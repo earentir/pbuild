@@ -2,11 +2,10 @@ package gitmeta
 
 import (
 	"errors"
-	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 func ResolveHEAD(repoRoot string) (string, error) {
@@ -52,38 +51,36 @@ func ResolveHEAD(repoRoot string) (string, error) {
 }
 
 func HeuristicDirty(repoRoot string) (bool, error) {
-	head, err := os.Stat(filepath.Join(repoRoot, ".git", "HEAD"))
+	// Check if there are local changes (uncommitted files)
+	cmd := exec.Command("git", "status", "--porcelain")
+	cmd.Dir = repoRoot
+	output, err := cmd.Output()
 	if err != nil {
-		return false, err
+		return false, nil
 	}
-	threshold := head.ModTime()
-	dirty := false
-	_ = filepath.WalkDir(repoRoot, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			name := d.Name()
-			// Skip directories that typically contain build artifacts or generated files
-			if name == ".git" || name == "vendor" || name == "builds" || name == "dist" || name == "bin" || name == "out" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		// Skip common build artifacts and binaries
-		name := d.Name()
-		if name == "pbuild" || strings.HasSuffix(name, ".exe") || strings.HasSuffix(name, ".so") || strings.HasSuffix(name, ".dylib") || strings.HasSuffix(name, ".dll") {
-			return nil
-		}
-		fi, err := d.Info()
-		if err != nil {
-			return nil
-		}
-		if fi.ModTime().After(threshold.Add(1 * time.Second)) {
-			dirty = true
-			return errors.New("done")
-		}
-		return nil
-	})
-	return dirty, nil
+
+	// If there are local changes, repo is dirty
+	if len(strings.TrimSpace(string(output))) > 0 {
+		return true, nil
+	}
+
+	// Check if local repo is behind remote
+	cmd = exec.Command("git", "fetch", "--dry-run")
+	cmd.Dir = repoRoot
+	err = cmd.Run()
+	if err != nil {
+		// If remote is not accessible, consider it clean
+		return false, nil
+	}
+
+	// Check if local branch is behind remote
+	cmd = exec.Command("git", "status", "-uno")
+	cmd.Dir = repoRoot
+	output, err = cmd.Output()
+	if err != nil {
+		return false, nil
+	}
+
+	// If output contains "behind", repo is dirty (not in sync with remote)
+	return strings.Contains(string(output), "behind"), nil
 }
