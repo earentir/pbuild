@@ -2,6 +2,7 @@ package gitmeta
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
