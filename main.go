@@ -29,7 +29,7 @@ import (
 	"pbuild/targets"
 )
 
-var appVersion = "1.1.5"
+var appVersion = "1.1.7"
 
 // getBuildMode returns the appropriate build mode for the target platform
 func getBuildMode(targetOS, targetArch, requestedMode string) string {
