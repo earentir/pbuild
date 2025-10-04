@@ -1,0 +1,61 @@
+{
+  "project_name": "pbuild",
+  "version": "1.1.5-unknown",
+  "build_time": "2025-10-04T23:54:38.458697875+03:00",
+  "build_duration": "318.647484ms",
+  "go_version": "go1.25.1",
+  "build_host": "themis.ear.pm",
+  "build_user": "earentir",
+  "build_os": "linux",
+  "build_arch": "amd64",
+  "targets": [
+    {
+      "OS": "linux",
+      "Arch": "amd64"
+    }
+  ],
+  "build_config": {
+    "Strategy": 1,
+    "AMD64Level": "v2",
+    "ARM64Level": "v8.0",
+    "ARMLevel": "7",
+    "MIPSLevel": "hardfloat",
+    "PPC64Level": "power8",
+    "RISCVLevel": "rva20u64",
+    "BuildMode": "auto",
+    "Tags": "",
+    "LDFlags": "",
+    "BuildFlags": "",
+    "Verbose": false,
+    "CleanCache": false
+  },
+  "flags": {
+    "all": false,
+    "amd64_level": "v2",
+    "arm64_level": "v8.0",
+    "arm_level": "7",
+    "build_flags": "",
+    "buildmode": "auto",
+    "checksums": true,
+    "clean_cache": false,
+    "compress": "",
+    "ldflags": "",
+    "mips_level": "hardfloat",
+    "name": "",
+    "output_dir": "builds",
+    "parallel": 6,
+    "ppc64_level": "power8",
+    "riscv_level": "rva20u64",
+    "skip_cleanup": false,
+    "stop_on_error": false,
+    "strategy": "purego",
+    "tags": "",
+    "verbose": false,
+    "version": ""
+  },
+  "artifacts": [
+    "pbuild"
+  ],
+  "success_count": 1,
+  "fail_count": 0
+}
