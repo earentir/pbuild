@@ -69,6 +69,11 @@ func HeuristicDirty(repoRoot string) (bool, error) {
 			}
 			return nil
 		}
+		// Skip common build artifacts and binaries
+		name := d.Name()
+		if name == "pbuild" || strings.HasSuffix(name, ".exe") || strings.HasSuffix(name, ".so") || strings.HasSuffix(name, ".dylib") || strings.HasSuffix(name, ".dll") {
+			return nil
+		}
 		fi, err := d.Info()
 		if err != nil {
 			return nil
