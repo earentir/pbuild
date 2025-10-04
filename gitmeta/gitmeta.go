@@ -63,7 +63,8 @@ func HeuristicDirty(repoRoot string) (bool, error) {
 		}
 		if d.IsDir() {
 			name := d.Name()
-			if name == ".git" || name == "vendor" {
+			// Skip directories that typically contain build artifacts or generated files
+			if name == ".git" || name == "vendor" || name == "builds" || name == "dist" || name == "bin" || name == "out" {
 				return filepath.SkipDir
 			}
 			return nil
