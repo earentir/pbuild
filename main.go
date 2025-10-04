@@ -132,6 +132,55 @@ func writeChecksumFile(filePath string, sha256Sum, sha512Sum string) error {
 	return os.WriteFile(hashFilePath, []byte(content), 0644)
 }
 
+// checkAndUpdateGitignore checks if builds/ directory is in .gitignore and adds it if missing
+func checkAndUpdateGitignore(workDir string) error {
+	gitignorePath := filepath.Join(workDir, ".gitignore")
+
+	// Check if .gitignore file exists
+	if _, err := os.Stat(gitignorePath); os.IsNotExist(err) {
+		// .gitignore doesn't exist, inform user and do nothing
+		fmt.Println("No .gitignore file found - skipping builds/ directory check")
+		return nil
+	}
+
+	// Read existing .gitignore file
+	content, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		return fmt.Errorf("failed to read .gitignore file: %v", err)
+	}
+
+	// Check if builds/ is already in the file
+	lines := strings.Split(string(content), "\n")
+	buildsEntryFound := false
+	for _, line := range lines {
+		// Trim whitespace and check for exact match
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "builds/" {
+			buildsEntryFound = true
+			break
+		}
+	}
+
+	// If builds/ is not found, add it
+	if !buildsEntryFound {
+		// Add builds/ to the end of the file
+		newContent := string(content)
+		if !strings.HasSuffix(newContent, "\n") && len(newContent) > 0 {
+			newContent += "\n"
+		}
+		newContent += "builds/\n"
+
+		if err := os.WriteFile(gitignorePath, []byte(newContent), 0644); err != nil {
+			return fmt.Errorf("failed to update .gitignore file: %v", err)
+		}
+		fmt.Println("Added builds/ to .gitignore file")
+	} else {
+		fmt.Println("builds/ directory already in .gitignore file")
+	}
+
+	return nil
+}
+
 // BuildMetadata holds build information
 type BuildMetadata struct {
 	ProjectName   string                 `json:"project_name"`
@@ -468,6 +517,11 @@ func run(targetDir string) error {
 			rev += "-dirty"
 		}
 		versionTag = fmt.Sprintf("%s-%s", base, rev)
+	}
+
+	// Check and update .gitignore to ensure builds/ directory is ignored
+	if err := checkAndUpdateGitignore(workDir); err != nil {
+		fmt.Printf("Warning: Failed to check/update .gitignore: %v\n", err)
 	}
 
 	// out dirs
