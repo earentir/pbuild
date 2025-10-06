@@ -17,7 +17,7 @@ A cross-compilation tool for Go projects that builds for multiple target platfor
 ## Installation
 
 ```bash
-go install github.com/yourusername/pbuild@latest
+go install github.com/earentir/pbuild@latest
 ```
 
 ## Usage
