@@ -29,10 +29,10 @@ import (
 	"pbuild/targets"
 )
 
-var appVersion = "1.1.7"
+var appVersion = "1.1.19"
 
 // getBuildMode returns the appropriate build mode for the target platform
-func getBuildMode(targetOS, targetArch, requestedMode string) string {
+func getBuildMode(requestedMode string) string {
 	if requestedMode != "auto" {
 		return requestedMode
 	}
@@ -538,7 +538,7 @@ func run(targetDir string) error {
 	}
 
 	// matrix
-	matrix := []targets.Target{}
+	var matrix []targets.Target
 	if flagAll {
 		matrix = targets.Default()
 	} else {
@@ -590,7 +590,7 @@ func run(targetDir string) error {
 				}
 
 				// Build configuration
-				buildMode := getBuildMode(t.OS, t.Arch, flagBuildMode)
+				buildMode := getBuildMode(flagBuildMode)
 				strategy := getBuildStrategy(flagStrategy, buildMode)
 
 				// Warn if strategy was changed due to PIE requirements

@@ -43,7 +43,7 @@ func getBuildTags(strategy BuildTagStrategy) string {
 	case FlexibleCGO:
 		return "netgo,osusergo"
 	case NoCGOEver:
-		return "purego"
+		return "purego,netgo,osusergo"
 	case TraditionalCGO:
 		return "" // Will use CGO_ENABLED=0 instead
 	default:
@@ -77,7 +77,7 @@ func Build(ctx context.Context, workDir string, t targets.Target, outputPath, ld
 		MIPSLevel:  "hardfloat",
 		PPC64Level: "power8",
 		RISCVLevel: "rva20u64",
-		BuildMode:  "pie",
+		BuildMode:  "exe",
 		LDFlags:    ldflags,
 		BuildFlags: "-trimpath",
 		CleanCache: true,
@@ -130,7 +130,7 @@ func BuildWithConfig(ctx context.Context, workDir string, t targets.Target, outp
 	)
 
 	// Handle CGO based on strategy
-	if config.Strategy == TraditionalCGO {
+	if config.Strategy != FlexibleCGO {
 		env = append(env, "CGO_ENABLED=0")
 	}
 
@@ -178,7 +178,7 @@ func BuildWithConfig(ctx context.Context, workDir string, t targets.Target, outp
 			fmt.Printf(" GORISCV64=%s", config.RISCVLevel)
 		}
 
-		if config.Strategy == TraditionalCGO {
+		if config.Strategy != FlexibleCGO {
 			fmt.Printf(" CGO_ENABLED=0")
 		}
 		fmt.Println()
