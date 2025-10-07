@@ -214,7 +214,7 @@ var (
 	flagAll         bool
 	flagName        string
 	flagOutDir      string
-	flagVersion     string
+	flagSetVersion  string
 	flagStrategy    string
 	flagAMD64Level  string
 	flagARM64Level  string
@@ -249,10 +249,13 @@ func main() {
 			return run(target)
 		},
 	}
+	// Expose tool version via built-in --version
+	root.Version = appVersion
+	root.SetVersionTemplate("{{.Version}}\n")
 	root.Flags().BoolVar(&flagAll, "all", false, "build for all predefined targets")
 	root.Flags().StringVar(&flagName, "name", "", "override inferred project name")
 	root.Flags().StringVar(&flagOutDir, "output-dir", "builds", "directory for build artifacts")
-	root.Flags().StringVar(&flagVersion, "version", "", "override embedded version tag")
+	root.Flags().StringVar(&flagSetVersion, "set-version", "", "override embedded version tag")
 
 	// Build configuration flags
 	root.Flags().StringVar(&flagStrategy, "strategy", "purego", "build strategy: flexible, purego, traditional")
@@ -502,7 +505,7 @@ func run(targetDir string) error {
 	}
 
 	// version
-	versionTag := flagVersion
+	versionTag := flagSetVersion
 	if versionTag == "" {
 		base, _ := appver.ExtractAppVersion(workDir)
 		if base == "" {
@@ -811,7 +814,8 @@ func run(targetDir string) error {
 			"all":           flagAll,
 			"name":          flagName,
 			"output_dir":    flagOutDir,
-			"version":       flagVersion,
+			"set_version":   flagSetVersion,
+			"tool_version":  appVersion,
 			"strategy":      flagStrategy,
 			"amd64_level":   flagAMD64Level,
 			"arm64_level":   flagARM64Level,
