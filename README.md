@@ -15,6 +15,8 @@ A cross-compilation tool for Go projects that builds for multiple target platfor
 - Flexible build strategies (purego, flexible, traditional)
 - **Reproducible builds** (`--reproducible`): same code produces the same binary hash; forces `-trimpath` and deterministic gzip
 - **Vendor support** (`--vendor`): build with `-mod=vendor`; creates `vendor/` if missing; prompts to re-vendor and retry when builds fail due to out-of-date vendored packages
+- **GPG signing** (`--sign`): create detached signatures (`.sig` or `.asc`) for each artifact using a pure-Go OpenPGP implementation; each signature is verified after creation
+- **Profile** (`--profile`): use a saved target list from `builds/.pbuild-profile.json`; on first run the file is created with all targets enabled—edit it to set `"enabled": false` for targets you don't want; subsequent builds use only enabled targets
 
 ## Installation
 
@@ -49,6 +51,16 @@ pbuild --reproducible --vendor
 Use vendored dependencies (creates `vendor/` on first run if missing; prompts to re-vendor on failure if packages are out of date):
 ```bash
 pbuild --vendor
+```
+
+Sign release artifacts with GPG (requires a key file; see [Generating a GPG key pair](#generating-a-gpg-key-pair)):
+```bash
+pbuild --all --sign --signing-key-file ./release-key.asc
+```
+
+Use a profile to build only the targets you want (first run creates `builds/.pbuild-profile.json` with all targets enabled; edit to disable, then run again):
+```bash
+pbuild --profile
 ```
 
 ### Example Runs
@@ -220,7 +232,106 @@ Flags:
       --tags string          additional build tags (comma-separated)
       --verbose              show actual go build commands
       --vendor               use vendored dependencies (-mod=vendor); create vendor/ if missing; prompt to re-vendor on failure if out of date
-      --set-version string   override embedded version tag
+      --sign                  create GPG detached signatures (.sig or .asc) for each artifact and verify after signing
+      --signing-key-file path path to armored private key file (required when --sign)
+      --signing-key id        key ID (hex) when key file contains multiple keys
+      --sign-armor            output ASCII-armored signatures (.asc) instead of binary (.sig)
+      --profile               use target list from builds/.pbuild-profile.json (create on first run; edit to disable targets)
+      --set-version string    override embedded version tag
+```
+
+## Profile (saved target list)
+
+With `--profile`, pbuild uses a config file in the output directory to decide which OS/arch targets to build. This lets you avoid `--all` while still building a fixed set of targets every time.
+
+1. **First run:** `pbuild --profile` creates `builds/.pbuild-profile.json` with every predefined target and `"enabled": true`, then builds all of them.
+2. **Edit the file:** Set `"enabled": false` for any target you don't want (e.g. drop `freebsd`, `openbsd`, or specific arches).
+3. **Next runs:** `pbuild --profile` builds only the targets that still have `"enabled": true`.
+
+Example profile (after editing):
+
+```json
+{
+  "version": 1,
+  "targets": [
+    { "os": "linux", "arch": "amd64", "enabled": true },
+    { "os": "linux", "arch": "arm64", "enabled": true },
+    { "os": "darwin", "arch": "amd64", "enabled": false },
+    { "os": "darwin", "arch": "arm64", "enabled": true },
+    { "os": "windows", "arch": "amd64", "enabled": true }
+  ]
+}
+```
+
+The profile file lives under your output dir (default `builds/`), which is typically in `.gitignore`, so it is not committed. You can commit it if you want to share the same target list with others.
+
+## Generating a GPG key pair
+
+pbuild does **not** create or manage keys; it only signs with a key you provide. Use [GnuPG](https://gnupg.org/) to create a key and export it for pbuild.
+
+### 1. Create a new key (GnuPG 2.1+)
+
+```bash
+gpg --full-generate-key
+```
+
+- Choose **RSA and RSA** (or **EdDSA** if you prefer).
+- Set key size (e.g. 4096 for RSA).
+- Enter your name, email, and an optional comment.
+- Set a **passphrase** to protect the private key (recommended).
+
+### 2. List your secret keys
+
+```bash
+gpg --list-secret-keys --keyid-format=long
+```
+
+Example output:
+
+```
+sec   rsa4096/ABCD1234EF567890 2024-01-15 [SC]
+      XXXX...
+uid                 [ultimate] Your Name <you@example.com>
+```
+
+The key ID is the part after the slash (e.g. `ABCD1234EF567890`).
+
+### 3. Export the private key to a file (for pbuild)
+
+Export the key in **armored** form so pbuild can read it:
+
+```bash
+gpg --export-secret-keys -a KEY_ID > release-key.asc
+```
+
+Replace `KEY_ID` with your key ID (e.g. `ABCD1234EF567890`). Keep `release-key.asc` secure and **do not commit it** to version control. Add it to `.gitignore`:
+
+```
+release-key.asc
+```
+
+### 4. Use the key with pbuild
+
+```bash
+pbuild --all --sign --signing-key-file ./release-key.asc
+```
+
+- If the key is **passphrase-protected**, pbuild will prompt for the passphrase, or you can set `PBUILD_SIGNING_PASSPHRASE` in the environment (e.g. in CI).
+- If the key file contains **multiple keys**, specify which one with `--signing-key KEY_ID`.
+- Use `--sign-armor` to produce `.asc` (ASCII) signatures instead of binary `.sig`.
+
+### 5. Verify signatures (downstream users)
+
+Anyone can verify a signed artifact with GnuPG:
+
+```bash
+gpg --verify myapp.sig myapp
+```
+
+Import your **public** key first if needed:
+
+```bash
+gpg --import your-public-key.asc
 ```
 
 ## Build Artifacts
@@ -234,6 +345,7 @@ builds/
     ├── myapp.exe           # Windows binaries
     ├── myapp.zst           # Compressed binaries (if --compress used)
     ├── myapp.hash          # Checksum files (if --checksums enabled)
+    ├── myapp.sig           # GPG detached signatures (if --sign used; .asc with --sign-armor)
     └── build-metadata.json # Build information and configuration
 ```
 
