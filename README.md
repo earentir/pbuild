@@ -323,11 +323,11 @@ pbuild --all --sign --signing-key-file ./release-key.asc
 
 If your exported key is **passphrase-protected** (recommended when creating the key), pbuild needs the passphrase to decrypt it:
 
-- **Interactive:** Run pbuild as usual; when signing starts, it will prompt:
+- **Interactive:** Run pbuild from a terminal; when signing starts, it will prompt (like GPG):
   ```
   Passphrase for signing key: 
   ```
-  Type the passphrase and press Enter. It is not echoed.
+  Type the passphrase and press Enter. **The passphrase is not echoed** to the terminal (secure input).
 
 - **Non-interactive / CI:** Set the environment variable **`PBUILD_SIGNING_PASSPHRASE`** to the passphrase so pbuild never prompts:
   ```bash
@@ -338,18 +338,19 @@ If your exported key is **passphrase-protected** (recommended when creating the 
 
 - **No passphrase:** If the key was exported without a passphrase, leave the env unset and press Enter at the prompt (empty passphrase).
 
-### 6. Verify signatures (downstream users)
+- **Not a terminal:** If stdin is not a terminal (e.g. CI, pipe), pbuild will not prompt; you must set `PBUILD_SIGNING_PASSPHRASE` or signing will fail with a clear error.
 
-Anyone can verify a signed artifact with GnuPG:
+### 6. Public key in the build dir
+
+When you sign with `--sign`, pbuild writes the **public key** into the same build directory (version folder) as **`release-key.asc`**. That way anyone can verify the signatures without your private key. This matches common practice for GitHub releases and similar: ship the public key next to the signed artifacts so users can run `gpg --import release-key.asc` then `gpg --verify myapp.sig myapp`.
+
+### 7. Verify signatures (downstream users)
+
+Anyone can verify a signed artifact with GnuPG. Use the **release-key.asc** from the same release dir:
 
 ```bash
+gpg --import release-key.asc
 gpg --verify myapp.sig myapp
-```
-
-Import your **public** key first if needed:
-
-```bash
-gpg --import your-public-key.asc
 ```
 
 ## Build Artifacts
@@ -364,6 +365,7 @@ builds/
     ├── myapp.zst           # Compressed binaries (if --compress used)
     ├── myapp.hash          # Checksum files (if --checksums enabled)
     ├── myapp.sig           # GPG detached signatures (if --sign used; .asc with --sign-armor)
+    ├── release-key.asc     # Public key for verification (if --sign used)
     └── build-metadata.json # Build information and configuration
 ```
 

@@ -8,8 +8,12 @@ import (
 	"strings"
 
 	"github.com/keybase/go-crypto/openpgp"
+	"github.com/keybase/go-crypto/openpgp/armor"
 	"github.com/keybase/go-crypto/openpgp/packet"
 )
+
+// PublicKeyFilename is the conventional name for the public key file in a release (e.g. for GitHub).
+const PublicKeyFilename = "release-key.asc"
 
 // LoadSigningEntity reads an armored private key from keyFilePath, optionally selects by keyID (hex string),
 // and decrypts the private key with passphrase. Returns the entity ready for signing.
@@ -67,6 +71,28 @@ func LoadSigningEntity(keyFilePath, keyID string, passphrase []byte) (*openpgp.E
 	}
 
 	return entity, nil
+}
+
+// ExportPublicKey writes the entity's public key in armored form to outPath (e.g. versionDir/release-key.asc).
+// Use this so release consumers can verify signatures without the private key.
+func ExportPublicKey(entity *openpgp.Entity, outPath string) error {
+	f, err := os.Create(outPath)
+	if err != nil {
+		return fmt.Errorf("create public key file: %w", err)
+	}
+	defer f.Close()
+	w, err := armor.Encode(f, openpgp.PublicKeyType, nil)
+	if err != nil {
+		return fmt.Errorf("armor encode: %w", err)
+	}
+	if err := entity.Serialize(w); err != nil {
+		w.Close()
+		return fmt.Errorf("serialize public key: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("close armor writer: %w", err)
+	}
+	return nil
 }
 
 // SignFile creates a detached signature of artifactPath and writes it to sigPath.
