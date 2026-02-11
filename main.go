@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -9,7 +10,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"pbuild/appver"
+	"pbuild/fsutil"
+	"pbuild/gitmeta"
+	"pbuild/gobuild"
+	"pbuild/targets"
 	"runtime"
 	"strings"
 	"sync"
@@ -21,15 +28,9 @@ import (
 	"github.com/olekukonko/tablewriter/renderer"
 	"github.com/olekukonko/tablewriter/tw"
 	"github.com/spf13/cobra"
-
-	"pbuild/appver"
-	"pbuild/fsutil"
-	"pbuild/gitmeta"
-	"pbuild/gobuild"
-	"pbuild/targets"
 )
 
-var appVersion = "1.1.19"
+var appVersion = "1.2.23"
 
 // getBuildMode returns the appropriate build mode for the target platform
 func getBuildMode(requestedMode string) string {
@@ -51,8 +52,9 @@ func getBuildStrategy(requestedStrategy, buildMode string) gobuild.BuildTagStrat
 	return gobuild.ParseStrategy(requestedStrategy)
 }
 
-// compressFile compresses a file using the specified method
-func compressFile(inputPath, outputPath, method string) error {
+// compressFile compresses a file using the specified method.
+// When deterministic is true and method is gzip, the gzip header ModTime is set to zero for reproducible checksums.
+func compressFile(inputPath, outputPath, method string, deterministic bool) error {
 	inputFile, err := os.Open(inputPath)
 	if err != nil {
 		return err
@@ -68,7 +70,11 @@ func compressFile(inputPath, outputPath, method string) error {
 	var writer io.Writer
 	switch method {
 	case "gzip":
-		writer = gzip.NewWriter(outputFile)
+		gz := gzip.NewWriter(outputFile)
+		if deterministic {
+			gz.Header.ModTime = time.Unix(0, 0)
+		}
+		writer = gz
 	case "zstd":
 		writer, err = zstd.NewWriter(outputFile)
 		if err != nil {
@@ -130,6 +136,36 @@ func writeChecksumFile(filePath string, sha256Sum, sha512Sum string) error {
 		filepath.Base(filePath), sha512Sum)
 
 	return os.WriteFile(hashFilePath, []byte(content), 0644)
+}
+
+// isVendorRelatedError returns true if the build error suggests out-of-date or missing vendored packages.
+func isVendorRelatedError(errMsg string) bool {
+	s := strings.ToLower(errMsg)
+	return strings.Contains(s, "not in goroot or vendor") ||
+		strings.Contains(s, "missing module") ||
+		strings.Contains(s, "no required module") ||
+		strings.Contains(s, "go.sum") ||
+		strings.Contains(s, "checksum mismatch") ||
+		strings.Contains(s, "cannot find package")
+}
+
+// ensureVendor runs go mod vendor in workDir if vendor/ is missing or empty. Returns nil if not using modules.
+func ensureVendor(ctx context.Context, workDir string) error {
+	if _, err := os.Stat(filepath.Join(workDir, "go.mod")); os.IsNotExist(err) {
+		return nil
+	}
+	vendorDir := filepath.Join(workDir, "vendor")
+	if fi, err := os.Stat(vendorDir); err == nil && fi.IsDir() {
+		// Check if vendor is non-empty (has modules.txt)
+		if _, err := os.Stat(filepath.Join(vendorDir, "modules.txt")); err == nil {
+			return nil
+		}
+	}
+	cmd := exec.CommandContext(ctx, "go", "mod", "vendor")
+	cmd.Dir = workDir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 // checkAndUpdateGitignore checks if builds/ directory is in .gitignore and adds it if missing
@@ -211,28 +247,30 @@ func writeBuildMetadata(versionDir string, metadata BuildMetadata) error {
 }
 
 var (
-	flagAll         bool
-	flagName        string
-	flagOutDir      string
-	flagSetVersion  string
-	flagStrategy    string
-	flagAMD64Level  string
-	flagARM64Level  string
-	flagARMLevel    string
-	flagMIPSLevel   string
-	flagPPC64Level  string
-	flagRISCVLevel  string
-	flagBuildMode   string
-	flagTags        string
-	flagLDFlags     string
-	flagBuildFlags  string
-	flagVerbose     bool
-	flagSkipCleanup bool
-	flagStopOnError bool
-	flagParallel    int
-	flagCleanCache  bool
-	flagCompress    string
-	flagChecksums   bool
+	flagAll          bool
+	flagName         string
+	flagOutDir       string
+	flagSetVersion   string
+	flagStrategy     string
+	flagAMD64Level   string
+	flagARM64Level   string
+	flagARMLevel     string
+	flagMIPSLevel    string
+	flagPPC64Level   string
+	flagRISCVLevel   string
+	flagBuildMode    string
+	flagTags         string
+	flagLDFlags      string
+	flagBuildFlags   string
+	flagVerbose      bool
+	flagSkipCleanup  bool
+	flagStopOnError  bool
+	flagParallel     int
+	flagCleanCache   bool
+	flagCompress     string
+	flagChecksums    bool
+	flagReproducible bool
+	flagVendor       bool
 )
 
 func main() {
@@ -246,7 +284,7 @@ func main() {
 			if len(args) == 1 {
 				target = args[0]
 			}
-			return run(target)
+			return run(target, false)
 		},
 	}
 	// Expose tool version via built-in --version
@@ -281,6 +319,10 @@ func main() {
 	root.Flags().StringVar(&flagCompress, "compress", "", "compress binaries: zstd, gzip")
 	root.Flags().BoolVar(&flagChecksums, "checksums", true, "generate SHA256 and SHA512 checksums")
 
+	// Reproducible and vendor
+	root.Flags().BoolVar(&flagReproducible, "reproducible", false, "ensure reproducible builds (same code → same binary hash); forces -trimpath and deterministic gzip")
+	root.Flags().BoolVar(&flagVendor, "vendor", false, "use vendored dependencies (-mod=vendor); create vendor/ if missing; prompt to re-vendor on failure if out of date")
+
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -299,8 +341,8 @@ func showConfigTables() {
 	)
 	buildTbl.Header([]string{"Build Config", "Value"})
 	buildData := [][]any{
-		[]any{"Strategy", flagStrategy},
-		[]any{"Build Mode", flagBuildMode},
+		{"Strategy", flagStrategy},
+		{"Build Mode", flagBuildMode},
 	}
 
 	// Add custom build flags if present
@@ -329,12 +371,12 @@ func showConfigTables() {
 	)
 	cpuTbl.Header([]string{"CPU Levels", "Value"})
 	cpuData := [][]any{
-		[]any{"AMD64", flagAMD64Level},
-		[]any{"ARM64", flagARM64Level},
-		[]any{"ARM", flagARMLevel},
-		[]any{"MIPS", flagMIPSLevel},
-		[]any{"PPC64", flagPPC64Level},
-		[]any{"RISC-V", flagRISCVLevel},
+		{"AMD64", flagAMD64Level},
+		{"ARM64", flagARM64Level},
+		{"ARM", flagARMLevel},
+		{"MIPS", flagMIPSLevel},
+		{"PPC64", flagPPC64Level},
+		{"RISC-V", flagRISCVLevel},
 	}
 	_ = cpuTbl.Bulk(cpuData)
 
@@ -348,12 +390,14 @@ func showConfigTables() {
 	)
 	behaviorTbl.Header([]string{"Behavior", "Value"})
 	behaviorData := [][]any{
-		[]any{"Parallel Workers", fmt.Sprintf("%d", flagParallel)},
-		[]any{"Clean Cache", fmt.Sprintf("%t", flagCleanCache)},
-		[]any{"Skip Cleanup", fmt.Sprintf("%t", flagSkipCleanup)},
-		[]any{"Stop on Error", fmt.Sprintf("%t", flagStopOnError)},
-		[]any{"Verbose", fmt.Sprintf("%t", flagVerbose)},
-		[]any{"Generate Checksums", fmt.Sprintf("%t", flagChecksums)},
+		{"Parallel Workers", fmt.Sprintf("%d", flagParallel)},
+		{"Clean Cache", fmt.Sprintf("%t", flagCleanCache)},
+		{"Skip Cleanup", fmt.Sprintf("%t", flagSkipCleanup)},
+		{"Stop on Error", fmt.Sprintf("%t", flagStopOnError)},
+		{"Verbose", fmt.Sprintf("%t", flagVerbose)},
+		{"Generate Checksums", fmt.Sprintf("%t", flagChecksums)},
+		{"Reproducible", fmt.Sprintf("%t", flagReproducible)},
+		{"Vendor", fmt.Sprintf("%t", flagVendor)},
 	}
 	_ = behaviorTbl.Bulk(behaviorData)
 
@@ -377,8 +421,8 @@ func renderTablesSideBySide(buildTbl, cpuTbl, behaviorTbl *tablewriter.Table) {
 	)
 	buildCapture.Header([]string{"Build Config", "Value"})
 	buildData := [][]any{
-		[]any{"Strategy", flagStrategy},
-		[]any{"Build Mode", flagBuildMode},
+		{"Strategy", flagStrategy},
+		{"Build Mode", flagBuildMode},
 	}
 	if flagTags != "" {
 		buildData = append(buildData, []any{"Custom Tags", flagTags})
@@ -407,12 +451,12 @@ func renderTablesSideBySide(buildTbl, cpuTbl, behaviorTbl *tablewriter.Table) {
 	)
 	cpuCapture.Header([]string{"CPU Levels", "Value"})
 	cpuData := [][]any{
-		[]any{"AMD64", flagAMD64Level},
-		[]any{"ARM64", flagARM64Level},
-		[]any{"ARM", flagARMLevel},
-		[]any{"MIPS", flagMIPSLevel},
-		[]any{"PPC64", flagPPC64Level},
-		[]any{"RISC-V", flagRISCVLevel},
+		{"AMD64", flagAMD64Level},
+		{"ARM64", flagARM64Level},
+		{"ARM", flagARMLevel},
+		{"MIPS", flagMIPSLevel},
+		{"PPC64", flagPPC64Level},
+		{"RISC-V", flagRISCVLevel},
 	}
 	_ = cpuCapture.Bulk(cpuData)
 	cpuCapture.Render()
@@ -429,12 +473,14 @@ func renderTablesSideBySide(buildTbl, cpuTbl, behaviorTbl *tablewriter.Table) {
 	)
 	behaviorCapture.Header([]string{"Behavior", "Value"})
 	behaviorData := [][]any{
-		[]any{"Parallel Workers", fmt.Sprintf("%d", flagParallel)},
-		[]any{"Clean Cache", fmt.Sprintf("%t", flagCleanCache)},
-		[]any{"Skip Cleanup", fmt.Sprintf("%t", flagSkipCleanup)},
-		[]any{"Stop on Error", fmt.Sprintf("%t", flagStopOnError)},
-		[]any{"Verbose", fmt.Sprintf("%t", flagVerbose)},
-		[]any{"Generate Checksums", fmt.Sprintf("%t", flagChecksums)},
+		{"Parallel Workers", fmt.Sprintf("%d", flagParallel)},
+		{"Clean Cache", fmt.Sprintf("%t", flagCleanCache)},
+		{"Skip Cleanup", fmt.Sprintf("%t", flagSkipCleanup)},
+		{"Stop on Error", fmt.Sprintf("%t", flagStopOnError)},
+		{"Verbose", fmt.Sprintf("%t", flagVerbose)},
+		{"Generate Checksums", fmt.Sprintf("%t", flagChecksums)},
+		{"Reproducible", fmt.Sprintf("%t", flagReproducible)},
+		{"Vendor", fmt.Sprintf("%t", flagVendor)},
 	}
 	_ = behaviorCapture.Bulk(behaviorData)
 	behaviorCapture.Render()
@@ -475,7 +521,7 @@ func renderTablesSideBySide(buildTbl, cpuTbl, behaviorTbl *tablewriter.Table) {
 	}
 }
 
-func run(targetDir string) error {
+func run(targetDir string, isRetry bool) error {
 	startTime := time.Now()
 
 	abs, err := filepath.Abs(targetDir)
@@ -491,6 +537,13 @@ func run(targetDir string) error {
 	gitRoot := workDir
 	if gr, err := fsutil.FindGitRoot(workDir); err == nil {
 		gitRoot = gr
+	}
+
+	// When using vendor, ensure vendor/ exists before building (create if never run before)
+	if flagVendor && !isRetry {
+		if err := ensureVendor(context.Background(), workDir); err != nil {
+			return fmt.Errorf("go mod vendor failed: %w", err)
+		}
 	}
 
 	// name
@@ -554,8 +607,8 @@ func run(targetDir string) error {
 	showConfigTables()
 	fmt.Println()
 
-	// collect rows for summary table
-	type row struct{ file, target, size, sha256, status string }
+	// collect rows for summary table (errMsg used to detect vendor-related failures)
+	type row struct{ file, target, size, sha256, status, errMsg string }
 	var rows []row
 
 	// status glyphs
@@ -604,19 +657,21 @@ func run(targetDir string) error {
 				}
 
 				config := gobuild.BuildConfig{
-					Strategy:   strategy,
-					AMD64Level: flagAMD64Level,
-					ARM64Level: flagARM64Level,
-					ARMLevel:   flagARMLevel,
-					MIPSLevel:  flagMIPSLevel,
-					PPC64Level: flagPPC64Level,
-					RISCVLevel: flagRISCVLevel,
-					BuildMode:  buildMode,
-					Tags:       flagTags,
-					LDFlags:    flagLDFlags,
-					BuildFlags: flagBuildFlags,
-					Verbose:    flagVerbose,
-					CleanCache: flagCleanCache,
+					Strategy:     strategy,
+					AMD64Level:   flagAMD64Level,
+					ARM64Level:   flagARM64Level,
+					ARMLevel:     flagARMLevel,
+					MIPSLevel:    flagMIPSLevel,
+					PPC64Level:   flagPPC64Level,
+					RISCVLevel:   flagRISCVLevel,
+					BuildMode:    buildMode,
+					Tags:         flagTags,
+					LDFlags:      flagLDFlags,
+					BuildFlags:   flagBuildFlags,
+					Verbose:      flagVerbose,
+					CleanCache:   flagCleanCache,
+					Reproducible: flagReproducible,
+					UseVendor:    flagVendor,
 				}
 
 				// Set default ldflags if not provided
@@ -625,6 +680,7 @@ func run(targetDir string) error {
 				}
 
 				if err := gobuild.BuildWithConfig(ctx, workDir, t, outPath, config); err != nil {
+					errStr := err.Error()
 					if flagVerbose {
 						fmt.Printf("[Worker %d]   FAILED\n  %v\n\n", workerID, err)
 					} else {
@@ -636,6 +692,7 @@ func run(targetDir string) error {
 						size:   "n/a",
 						sha256: "n/a",
 						status: redX,
+						errMsg: errStr,
 					}
 					continue
 				}
@@ -652,7 +709,7 @@ func run(targetDir string) error {
 						ext = ".zst"
 					}
 					compressedPath := outPath + ext
-					if err := compressFile(outPath, compressedPath, flagCompress); err != nil {
+					if err := compressFile(outPath, compressedPath, flagCompress, flagReproducible); err != nil {
 						if flagVerbose {
 							fmt.Printf("[Worker %d]   Compression failed: %v\n", workerID, err)
 						}
@@ -744,6 +801,36 @@ func run(targetDir string) error {
 		}
 	}
 
+	// If builds failed with --vendor and errors look like stale vendor, offer to re-vendor and retry once
+	if failCount > 0 && flagVendor && !isRetry {
+		var anyVendorRelated bool
+		for _, r := range rows {
+			if r.status == redX && isVendorRelatedError(r.errMsg) {
+				anyVendorRelated = true
+				break
+			}
+		}
+		if anyVendorRelated {
+			fmt.Print("\nBuild failed; may be due to out-of-date vendored packages. Re-vendor and retry? (y/n): ")
+			scanner := bufio.NewScanner(os.Stdin)
+			if scanner.Scan() {
+				line := strings.TrimSpace(strings.ToLower(scanner.Text()))
+				if line == "y" || line == "yes" {
+					cmd := exec.CommandContext(ctx, "go", "mod", "vendor")
+					cmd.Dir = workDir
+					cmd.Stdout = os.Stdout
+					cmd.Stderr = os.Stderr
+					if err := cmd.Run(); err != nil {
+						fmt.Fprintf(os.Stderr, "go mod vendor failed: %v\n", err)
+					} else {
+						fmt.Println("Re-running build after re-vendor...")
+						return run(targetDir, true)
+					}
+				}
+			}
+		}
+	}
+
 	fmt.Printf("\nArtifacts for %s, version %s\nstored in %s\n\n", projectName, versionTag, versionDir)
 
 	// render table — inner grid only, no outer frame
@@ -796,19 +883,21 @@ func run(targetDir string) error {
 		BuildArch:     runtime.GOARCH,
 		Targets:       matrix,
 		BuildConfig: gobuild.BuildConfig{
-			Strategy:   gobuild.ParseStrategy(flagStrategy),
-			AMD64Level: flagAMD64Level,
-			ARM64Level: flagARM64Level,
-			ARMLevel:   flagARMLevel,
-			MIPSLevel:  flagMIPSLevel,
-			PPC64Level: flagPPC64Level,
-			RISCVLevel: flagRISCVLevel,
-			BuildMode:  flagBuildMode, // Show the requested mode, not the resolved one
-			Tags:       flagTags,
-			LDFlags:    flagLDFlags,
-			BuildFlags: flagBuildFlags,
-			Verbose:    flagVerbose,
-			CleanCache: flagCleanCache,
+			Strategy:     gobuild.ParseStrategy(flagStrategy),
+			AMD64Level:   flagAMD64Level,
+			ARM64Level:   flagARM64Level,
+			ARMLevel:     flagARMLevel,
+			MIPSLevel:    flagMIPSLevel,
+			PPC64Level:   flagPPC64Level,
+			RISCVLevel:   flagRISCVLevel,
+			BuildMode:    flagBuildMode, // Show the requested mode, not the resolved one
+			Tags:         flagTags,
+			LDFlags:      flagLDFlags,
+			BuildFlags:   flagBuildFlags,
+			Verbose:      flagVerbose,
+			CleanCache:   flagCleanCache,
+			Reproducible: flagReproducible,
+			UseVendor:    flagVendor,
 		},
 		Flags: map[string]interface{}{
 			"all":           flagAll,
@@ -834,6 +923,8 @@ func run(targetDir string) error {
 			"clean_cache":   flagCleanCache,
 			"compress":      flagCompress,
 			"checksums":     flagChecksums,
+			"reproducible":  flagReproducible,
+			"vendor":        flagVendor,
 		},
 		Artifacts:    artifacts,
 		SuccessCount: successCount,

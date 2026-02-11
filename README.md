@@ -13,6 +13,8 @@ A cross-compilation tool for Go projects that builds for multiple target platfor
 - Checksum generation (SHA256, SHA512)
 - Build metadata and reporting
 - Flexible build strategies (purego, flexible, traditional)
+- **Reproducible builds** (`--reproducible`): same code produces the same binary hash; forces `-trimpath` and deterministic gzip
+- **Vendor support** (`--vendor`): build with `-mod=vendor`; creates `vendor/` if missing; prompts to re-vendor and retry when builds fail due to out-of-date vendored packages
 
 ## Installation
 
@@ -37,6 +39,16 @@ pbuild --all
 Build with verbose output:
 ```bash
 pbuild --verbose
+```
+
+Reproducible builds (same code → same binary hash; recommended with `--vendor` for fully deterministic builds):
+```bash
+pbuild --reproducible --vendor
+```
+
+Use vendored dependencies (creates `vendor/` on first run if missing; prompts to re-vendor on failure if packages are out of date):
+```bash
+pbuild --vendor
 ```
 
 ### Example Runs
@@ -200,13 +212,15 @@ Flags:
       --output-dir string    directory for build artifacts (default "builds")
       --parallel int         number of parallel builds (0 = sequential) (default 6)
       --ppc64-level string   GOPPC64 level: power8, power9, power10 (default "power8")
+      --reproducible         ensure reproducible builds (same code → same binary hash); forces -trimpath and deterministic gzip
       --riscv-level string   GORISCV64 level: rva20u64, rva22u64 (default "rva20u64")
       --skip-cleanup         skip cleaning previous build directory
       --stop-on-error        stop building others when one fails
       --strategy string      build strategy: flexible, purego, traditional (default "purego")
       --tags string          additional build tags (comma-separated)
       --verbose              show actual go build commands
-      --version string       override embedded version tag
+      --vendor               use vendored dependencies (-mod=vendor); create vendor/ if missing; prompt to re-vendor on failure if out of date
+      --set-version string   override embedded version tag
 ```
 
 ## Build Artifacts
