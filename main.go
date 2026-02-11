@@ -250,7 +250,7 @@ type BuildMetadata struct {
 	FailCount     int                    `json:"fail_count"`
 }
 
-// ProfileConfig holds the build profile (e.g. which targets are enabled). Stored in output dir as .pbuild-profile.json.
+// ProfileConfig holds the build profile (e.g. which targets are enabled). Stored in builds/ as pbuild-profile.json.
 type ProfileConfig struct {
 	Version int             `json:"version"`
 	Targets []ProfileTarget `json:"targets"`
@@ -262,12 +262,14 @@ type ProfileTarget struct {
 	Enabled bool   `json:"enabled"`
 }
 
-const profileFilename = ".pbuild-profile.json"
+const profileFilename = "pbuild-profile.json"
+const profileDirName = "builds" // profile always lives in the builds folder (not in version dir, not in custom output-dir)
 
-// getProfileTargets loads the profile from outDir. If the file does not exist, it is created with all default targets enabled
-// and justCreated is true. Returns the list of enabled targets and any error.
-func getProfileTargets(outDir string) (matrix []targets.Target, justCreated bool, err error) {
-	path := filepath.Join(outDir, profileFilename)
+// getProfileTargets loads the profile from the builds folder (workDir/builds/). If the file does not exist, it is created
+// with all default targets enabled and justCreated is true. Returns the list of enabled targets and any error.
+func getProfileTargets(workDir string) (matrix []targets.Target, justCreated bool, err error) {
+	profileDir := filepath.Join(workDir, profileDirName)
+	path := filepath.Join(profileDir, profileFilename)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -280,8 +282,8 @@ func getProfileTargets(outDir string) (matrix []targets.Target, justCreated bool
 			cfg.Targets[i] = ProfileTarget{OS: t.OS, Arch: t.Arch, Enabled: true}
 		}
 		body, _ := json.MarshalIndent(cfg, "", "  ")
-		if err := os.MkdirAll(outDir, 0o755); err != nil {
-			return nil, false, fmt.Errorf("create output dir for profile: %w", err)
+		if err := os.MkdirAll(profileDir, 0o755); err != nil {
+			return nil, false, fmt.Errorf("create builds dir for profile: %w", err)
 		}
 		if err := os.WriteFile(path, body, 0644); err != nil {
 			return nil, false, fmt.Errorf("write profile: %w", err)
@@ -399,7 +401,7 @@ func main() {
 	root.Flags().BoolVar(&flagSignArmor, "sign-armor", false, "output ASCII-armored signatures (.asc) instead of binary (.sig)")
 
 	// Profile: use saved target list from builds folder (create on first run, then build only enabled)
-	root.Flags().BoolVar(&flagProfile, "profile", false, "use profile: build targets from "+profileFilename+" in output dir (create with all enabled on first run; edit to disable targets)")
+	root.Flags().BoolVar(&flagProfile, "profile", false, "use profile: build targets from "+profileDirName+"/"+profileFilename+" (create with all enabled on first run; edit to disable targets)")
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -667,39 +669,41 @@ func run(targetDir string, isRetry bool) error {
 		fmt.Printf("Warning: Failed to check/update .gitignore: %v\n", err)
 	}
 
-	// out dirs
+	// out dir for build artifacts (version dirs go here)
 	outDir := flagOutDir
 	if !filepath.IsAbs(outDir) {
 		outDir = filepath.Join(workDir, outDir)
 	}
+
+	// matrix: from profile (builds/pbuild-profile.json), or --all, or current platform only. Do this before creating versionDir.
+	var matrix []targets.Target
+	if flagProfile {
+		var justCreated bool
+		matrix, justCreated, err = getProfileTargets(workDir)
+		if err != nil {
+			return err
+		}
+		profilePath := filepath.Join(workDir, profileDirName, profileFilename)
+		if justCreated {
+			fmt.Printf("Profile created: %s\n", profilePath)
+			fmt.Println("Edit the file and set \"enabled\": false for targets you don't want, then run with --profile again.")
+			return nil
+		}
+		if len(matrix) == 0 {
+			return fmt.Errorf("profile has no enabled targets; edit %s and set \"enabled\": true for at least one target", profilePath)
+		}
+	} else if flagAll {
+		matrix = targets.Default()
+	} else {
+		matrix = []targets.Target{{OS: runtime.GOOS, Arch: runtime.GOARCH}}
+	}
+
 	versionDir := filepath.Join(outDir, versionTag)
 	if !flagSkipCleanup {
 		_ = os.RemoveAll(versionDir)
 	}
 	if err := os.MkdirAll(versionDir, 0o755); err != nil {
 		return err
-	}
-
-	// matrix: from profile, or --all, or current platform only
-	var matrix []targets.Target
-	if flagProfile {
-		var justCreated bool
-		matrix, justCreated, err = getProfileTargets(outDir)
-		if err != nil {
-			return err
-		}
-		if len(matrix) == 0 {
-			return fmt.Errorf("profile has no enabled targets; edit %s and set \"enabled\": true for at least one target", filepath.Join(outDir, profileFilename))
-		}
-		if justCreated {
-			fmt.Printf("Profile created: %s\n", filepath.Join(outDir, profileFilename))
-			fmt.Println("Edit the file and set \"enabled\": false for targets you don't want, then run with --profile again.")
-			fmt.Println()
-		}
-	} else if flagAll {
-		matrix = targets.Default()
-	} else {
-		matrix = []targets.Target{{OS: runtime.GOOS, Arch: runtime.GOARCH}}
 	}
 
 	fmt.Printf("Building version %s\n\n", versionTag)
