@@ -16,6 +16,7 @@ import (
 	"pbuild/fsutil"
 	"pbuild/gitmeta"
 	"pbuild/gobuild"
+	"pbuild/sign"
 	"pbuild/targets"
 	"runtime"
 	"strings"
@@ -138,6 +139,19 @@ func writeChecksumFile(filePath string, sha256Sum, sha512Sum string) error {
 	return os.WriteFile(hashFilePath, []byte(content), 0644)
 }
 
+// getSigningPassphrase returns the passphrase for the signing key: from PBUILD_SIGNING_PASSPHRASE env, or interactive prompt.
+func getSigningPassphrase() []byte {
+	if s := os.Getenv("PBUILD_SIGNING_PASSPHRASE"); s != "" {
+		return []byte(s)
+	}
+	fmt.Print("Passphrase for signing key: ")
+	scanner := bufio.NewScanner(os.Stdin)
+	if scanner.Scan() {
+		return []byte(strings.TrimSpace(scanner.Text()))
+	}
+	return nil
+}
+
 // isVendorRelatedError returns true if the build error suggests out-of-date or missing vendored packages.
 func isVendorRelatedError(errMsg string) bool {
 	s := strings.ToLower(errMsg)
@@ -236,6 +250,56 @@ type BuildMetadata struct {
 	FailCount     int                    `json:"fail_count"`
 }
 
+// ProfileConfig holds the build profile (e.g. which targets are enabled). Stored in output dir as .pbuild-profile.json.
+type ProfileConfig struct {
+	Version int             `json:"version"`
+	Targets []ProfileTarget `json:"targets"`
+}
+
+type ProfileTarget struct {
+	OS      string `json:"os"`
+	Arch    string `json:"arch"`
+	Enabled bool   `json:"enabled"`
+}
+
+const profileFilename = ".pbuild-profile.json"
+
+// getProfileTargets loads the profile from outDir. If the file does not exist, it is created with all default targets enabled
+// and justCreated is true. Returns the list of enabled targets and any error.
+func getProfileTargets(outDir string) (matrix []targets.Target, justCreated bool, err error) {
+	path := filepath.Join(outDir, profileFilename)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, false, fmt.Errorf("read profile: %w", err)
+		}
+		// First time: create profile with all targets enabled
+		def := targets.Default()
+		cfg := ProfileConfig{Version: 1, Targets: make([]ProfileTarget, len(def))}
+		for i, t := range def {
+			cfg.Targets[i] = ProfileTarget{OS: t.OS, Arch: t.Arch, Enabled: true}
+		}
+		body, _ := json.MarshalIndent(cfg, "", "  ")
+		if err := os.MkdirAll(outDir, 0o755); err != nil {
+			return nil, false, fmt.Errorf("create output dir for profile: %w", err)
+		}
+		if err := os.WriteFile(path, body, 0644); err != nil {
+			return nil, false, fmt.Errorf("write profile: %w", err)
+		}
+		return def, true, nil
+	}
+	var cfg ProfileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, false, fmt.Errorf("parse profile: %w", err)
+	}
+	for _, t := range cfg.Targets {
+		if t.Enabled {
+			matrix = append(matrix, targets.Target{OS: t.OS, Arch: t.Arch})
+		}
+	}
+	return matrix, false, nil
+}
+
 // writeBuildMetadata writes build metadata to a JSON file
 func writeBuildMetadata(versionDir string, metadata BuildMetadata) error {
 	metadataPath := filepath.Join(versionDir, "build-metadata.json")
@@ -269,8 +333,13 @@ var (
 	flagCleanCache   bool
 	flagCompress     string
 	flagChecksums    bool
-	flagReproducible bool
-	flagVendor       bool
+	flagReproducible   bool
+	flagVendor         bool
+	flagSign           bool
+	flagSigningKeyFile string
+	flagSigningKey     string
+	flagSignArmor      bool
+	flagProfile        bool
 )
 
 func main() {
@@ -322,6 +391,15 @@ func main() {
 	// Reproducible and vendor
 	root.Flags().BoolVar(&flagReproducible, "reproducible", false, "ensure reproducible builds (same code → same binary hash); forces -trimpath and deterministic gzip")
 	root.Flags().BoolVar(&flagVendor, "vendor", false, "use vendored dependencies (-mod=vendor); create vendor/ if missing; prompt to re-vendor on failure if out of date")
+
+	// GPG signing (pure Go OpenPGP)
+	root.Flags().BoolVar(&flagSign, "sign", false, "create GPG detached signatures (.sig or .asc) for each artifact and verify after signing")
+	root.Flags().StringVar(&flagSigningKeyFile, "signing-key-file", "", "path to armored private key file for signing (required when --sign)")
+	root.Flags().StringVar(&flagSigningKey, "signing-key", "", "key ID (hex) to use when key file contains multiple keys")
+	root.Flags().BoolVar(&flagSignArmor, "sign-armor", false, "output ASCII-armored signatures (.asc) instead of binary (.sig)")
+
+	// Profile: use saved target list from builds folder (create on first run, then build only enabled)
+	root.Flags().BoolVar(&flagProfile, "profile", false, "use profile: build targets from "+profileFilename+" in output dir (create with all enabled on first run; edit to disable targets)")
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -398,6 +476,8 @@ func showConfigTables() {
 		{"Generate Checksums", fmt.Sprintf("%t", flagChecksums)},
 		{"Reproducible", fmt.Sprintf("%t", flagReproducible)},
 		{"Vendor", fmt.Sprintf("%t", flagVendor)},
+		{"Sign", fmt.Sprintf("%t", flagSign)},
+		{"Profile", fmt.Sprintf("%t", flagProfile)},
 	}
 	_ = behaviorTbl.Bulk(behaviorData)
 
@@ -481,6 +561,8 @@ func renderTablesSideBySide(buildTbl, cpuTbl, behaviorTbl *tablewriter.Table) {
 		{"Generate Checksums", fmt.Sprintf("%t", flagChecksums)},
 		{"Reproducible", fmt.Sprintf("%t", flagReproducible)},
 		{"Vendor", fmt.Sprintf("%t", flagVendor)},
+		{"Sign", fmt.Sprintf("%t", flagSign)},
+		{"Profile", fmt.Sprintf("%t", flagProfile)},
 	}
 	_ = behaviorCapture.Bulk(behaviorData)
 	behaviorCapture.Render()
@@ -546,6 +628,11 @@ func run(targetDir string, isRetry bool) error {
 		}
 	}
 
+	// Signing requires a key file
+	if flagSign && flagSigningKeyFile == "" {
+		return fmt.Errorf("--sign requires --signing-key-file")
+	}
+
 	// name
 	projectName := flagName
 	if projectName == "" {
@@ -593,9 +680,23 @@ func run(targetDir string, isRetry bool) error {
 		return err
 	}
 
-	// matrix
+	// matrix: from profile, or --all, or current platform only
 	var matrix []targets.Target
-	if flagAll {
+	if flagProfile {
+		var justCreated bool
+		matrix, justCreated, err = getProfileTargets(outDir)
+		if err != nil {
+			return err
+		}
+		if len(matrix) == 0 {
+			return fmt.Errorf("profile has no enabled targets; edit %s and set \"enabled\": true for at least one target", filepath.Join(outDir, profileFilename))
+		}
+		if justCreated {
+			fmt.Printf("Profile created: %s\n", filepath.Join(outDir, profileFilename))
+			fmt.Println("Edit the file and set \"enabled\": false for targets you don't want, then run with --profile again.")
+			fmt.Println()
+		}
+	} else if flagAll {
 		matrix = targets.Default()
 	} else {
 		matrix = []targets.Target{{OS: runtime.GOOS, Arch: runtime.GOARCH}}
@@ -871,6 +972,27 @@ func run(targetDir string, isRetry bool) error {
 		}
 	}
 
+	// GPG sign artifacts (and verify each signature)
+	if flagSign && len(artifacts) > 0 {
+		passphrase := getSigningPassphrase()
+		keyPath := flagSigningKeyFile
+		if !filepath.IsAbs(keyPath) {
+			keyPath = filepath.Join(workDir, keyPath)
+		}
+		entity, err := sign.LoadSigningEntity(keyPath, flagSigningKey, passphrase)
+		if err != nil {
+			return fmt.Errorf("load signing key: %w", err)
+		}
+		sigExt := ".sig"
+		if flagSignArmor {
+			sigExt = ".asc"
+		}
+		if err := sign.SignArtifacts(entity, versionDir, artifacts, sigExt); err != nil {
+			return fmt.Errorf("sign artifacts: %w", err)
+		}
+		fmt.Printf("Signed %d artifact(s) with GPG (signatures verified).\n\n", len(artifacts))
+	}
+
 	metadata := BuildMetadata{
 		ProjectName:   projectName,
 		Version:       versionTag,
@@ -925,6 +1047,11 @@ func run(targetDir string, isRetry bool) error {
 			"checksums":     flagChecksums,
 			"reproducible":  flagReproducible,
 			"vendor":        flagVendor,
+			"sign":          flagSign,
+			"signing_key_file": flagSigningKeyFile,
+			"signing_key":   flagSigningKey,
+			"sign_armor":    flagSignArmor,
+			"profile":       flagProfile,
 		},
 		Artifacts:    artifacts,
 		SuccessCount: successCount,
