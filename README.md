@@ -16,7 +16,7 @@ A cross-compilation tool for Go projects that builds for multiple target platfor
 - **Reproducible builds** (`--reproducible`): same code produces the same binary hash; forces `-trimpath` and deterministic gzip
 - **Vendor support** (`--vendor`): build with `-mod=vendor`; creates `vendor/` if missing; prompts to re-vendor and retry when builds fail due to out-of-date vendored packages
 - **GPG signing** (`--sign`): create detached signatures (`.sig` or `.asc`) for each artifact using a pure-Go OpenPGP implementation; each signature is verified after creation
-- **Profile** (`--profile`): use a saved target list from `builds/.pbuild-profile.json`; on first run the file is created with all targets enabled—edit it to set `"enabled": false` for targets you don't want; subsequent builds use only enabled targets
+- **Profile** (`--profile`): use a saved target list from `builds/pbuild-profile.json`; on first run the file is created with all targets enabled—edit it to set `"enabled": false` for targets you don't want; subsequent builds use only enabled targets
 
 ## Installation
 
@@ -58,7 +58,7 @@ Sign release artifacts with GPG (requires a key file; see [Generating a GPG key 
 pbuild --all --sign --signing-key-file ./release-key.asc
 ```
 
-Use a profile to build only the targets you want (first run creates `builds/.pbuild-profile.json` with all targets enabled; edit to disable, then run again):
+Use a profile to build only the targets you want (first run creates `builds/pbuild-profile.json` with all targets enabled; edit to disable, then run again):
 ```bash
 pbuild --profile
 ```
@@ -236,7 +236,7 @@ Flags:
       --signing-key-file path path to armored private key file (required when --sign)
       --signing-key id        key ID (hex) when key file contains multiple keys
       --sign-armor            output ASCII-armored signatures (.asc) instead of binary (.sig)
-      --profile               use target list from builds/.pbuild-profile.json (create on first run; edit to disable targets)
+      --profile               use target list from builds/pbuild-profile.json (create on first run; edit to disable targets)
       --set-version string    override embedded version tag
 ```
 
@@ -244,7 +244,7 @@ Flags:
 
 With `--profile`, pbuild uses a config file in the output directory to decide which OS/arch targets to build. This lets you avoid `--all` while still building a fixed set of targets every time.
 
-1. **First run:** `pbuild --profile` creates `builds/.pbuild-profile.json` with every predefined target and `"enabled": true`, then builds all of them.
+1. **First run:** `pbuild --profile` creates `builds/pbuild-profile.json` with every predefined target and `"enabled": true`, then exits (no build). Edit the file, then run again.
 2. **Edit the file:** Set `"enabled": false` for any target you don't want (e.g. drop `freebsd`, `openbsd`, or specific arches).
 3. **Next runs:** `pbuild --profile` builds only the targets that still have `"enabled": true`.
 
