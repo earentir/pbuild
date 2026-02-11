@@ -316,11 +316,29 @@ release-key.asc
 pbuild --all --sign --signing-key-file ./release-key.asc
 ```
 
-- If the key is **passphrase-protected**, pbuild will prompt for the passphrase, or you can set `PBUILD_SIGNING_PASSPHRASE` in the environment (e.g. in CI).
 - If the key file contains **multiple keys**, specify which one with `--signing-key KEY_ID`.
 - Use `--sign-armor` to produce `.asc` (ASCII) signatures instead of binary `.sig`.
 
-### 5. Verify signatures (downstream users)
+### 5. Password-protected keys
+
+If your exported key is **passphrase-protected** (recommended when creating the key), pbuild needs the passphrase to decrypt it:
+
+- **Interactive:** Run pbuild as usual; when signing starts, it will prompt:
+  ```
+  Passphrase for signing key: 
+  ```
+  Type the passphrase and press Enter. It is not echoed.
+
+- **Non-interactive / CI:** Set the environment variable **`PBUILD_SIGNING_PASSPHRASE`** to the passphrase so pbuild never prompts:
+  ```bash
+  export PBUILD_SIGNING_PASSPHRASE='your-passphrase'
+  pbuild --all --sign --signing-key-file ./release-key.asc
+  ```
+  Avoid committing this or logging it; use a secret manager in CI.
+
+- **No passphrase:** If the key was exported without a passphrase, leave the env unset and press Enter at the prompt (empty passphrase).
+
+### 6. Verify signatures (downstream users)
 
 Anyone can verify a signed artifact with GnuPG:
 
