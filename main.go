@@ -29,6 +29,7 @@ import (
 	"github.com/olekukonko/tablewriter/renderer"
 	"github.com/olekukonko/tablewriter/tw"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 var appVersion = "1.2.23"
@@ -139,17 +140,23 @@ func writeChecksumFile(filePath string, sha256Sum, sha512Sum string) error {
 	return os.WriteFile(hashFilePath, []byte(content), 0644)
 }
 
-// getSigningPassphrase returns the passphrase for the signing key: from PBUILD_SIGNING_PASSPHRASE env, or interactive prompt.
-func getSigningPassphrase() []byte {
+// getSigningPassphrase returns the passphrase for the signing key: from PBUILD_SIGNING_PASSPHRASE env, or
+// interactive prompt (no echo, like gpg). When not in a terminal, requires the env var.
+func getSigningPassphrase() ([]byte, error) {
 	if s := os.Getenv("PBUILD_SIGNING_PASSPHRASE"); s != "" {
-		return []byte(s)
+		return []byte(s), nil
+	}
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return nil, fmt.Errorf("passphrase required for signing key but stdin is not a terminal; set PBUILD_SIGNING_PASSPHRASE")
 	}
 	fmt.Print("Passphrase for signing key: ")
-	scanner := bufio.NewScanner(os.Stdin)
-	if scanner.Scan() {
-		return []byte(strings.TrimSpace(scanner.Text()))
+	passphrase, err := term.ReadPassword(fd)
+	fmt.Println()
+	if err != nil {
+		return nil, fmt.Errorf("read passphrase: %w", err)
 	}
-	return nil
+	return passphrase, nil
 }
 
 // isVendorRelatedError returns true if the build error suggests out-of-date or missing vendored packages.
@@ -978,7 +985,10 @@ func run(targetDir string, isRetry bool) error {
 
 	// GPG sign artifacts (and verify each signature)
 	if flagSign && len(artifacts) > 0 {
-		passphrase := getSigningPassphrase()
+		passphrase, err := getSigningPassphrase()
+		if err != nil {
+			return err
+		}
 		keyPath := flagSigningKeyFile
 		if !filepath.IsAbs(keyPath) {
 			keyPath = filepath.Join(workDir, keyPath)
@@ -987,6 +997,11 @@ func run(targetDir string, isRetry bool) error {
 		if err != nil {
 			return fmt.Errorf("load signing key: %w", err)
 		}
+		// Write public key into build dir so consumers can verify (e.g. GitHub release convention)
+		publicKeyPath := filepath.Join(versionDir, sign.PublicKeyFilename)
+		if err := sign.ExportPublicKey(entity, publicKeyPath); err != nil {
+			return fmt.Errorf("export public key: %w", err)
+		}
 		sigExt := ".sig"
 		if flagSignArmor {
 			sigExt = ".asc"
@@ -994,7 +1009,7 @@ func run(targetDir string, isRetry bool) error {
 		if err := sign.SignArtifacts(entity, versionDir, artifacts, sigExt); err != nil {
 			return fmt.Errorf("sign artifacts: %w", err)
 		}
-		fmt.Printf("Signed %d artifact(s) with GPG (signatures verified).\n\n", len(artifacts))
+		fmt.Printf("Signed %d artifact(s) with GPG (signatures verified). Wrote %s.\n\n", len(artifacts), sign.PublicKeyFilename)
 	}
 
 	metadata := BuildMetadata{
