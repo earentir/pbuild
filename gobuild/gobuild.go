@@ -53,19 +53,21 @@ func getBuildTags(strategy BuildTagStrategy) string {
 
 // BuildConfig holds all build configuration options
 type BuildConfig struct {
-	Strategy   BuildTagStrategy
-	AMD64Level string
-	ARM64Level string
-	ARMLevel   string
-	MIPSLevel  string
-	PPC64Level string
-	RISCVLevel string
-	BuildMode  string
-	Tags       string
-	LDFlags    string
-	BuildFlags string
-	Verbose    bool
-	CleanCache bool
+	Strategy    BuildTagStrategy
+	AMD64Level  string
+	ARM64Level  string
+	ARMLevel    string
+	MIPSLevel   string
+	PPC64Level  string
+	RISCVLevel  string
+	BuildMode   string
+	Tags        string
+	LDFlags     string
+	BuildFlags  string
+	Verbose     bool
+	CleanCache  bool
+	Reproducible bool
+	UseVendor   bool
 }
 
 func Build(ctx context.Context, workDir string, t targets.Target, outputPath, ldflags string) error {
@@ -96,11 +98,23 @@ func BuildWithConfig(ctx context.Context, workDir string, t targets.Target, outp
 	// Build command arguments
 	buildArgs := []string{"build"}
 
-	// Add build flags
-	if config.BuildFlags != "" {
-		buildArgs = append(buildArgs, config.BuildFlags)
-	} else {
-		buildArgs = append(buildArgs, "-trimpath")
+	// Add build flags: when Reproducible, always include -trimpath (merge with user flags)
+	buildFlags := config.BuildFlags
+	if config.Reproducible && !strings.Contains(buildFlags, "trimpath") {
+		if buildFlags != "" {
+			buildFlags = strings.TrimSpace(buildFlags) + " -trimpath"
+		} else {
+			buildFlags = "-trimpath"
+		}
+	}
+	if buildFlags == "" {
+		buildFlags = "-trimpath"
+	}
+	buildArgs = append(buildArgs, buildFlags)
+
+	// Use vendored dependencies when requested
+	if config.UseVendor {
+		buildArgs = append(buildArgs, "-mod=vendor")
 	}
 
 	// Add build mode
