@@ -130,16 +130,6 @@ func generateChecksums(filePath string) (string, string, error) {
 	return sha256Sum, sha512Sum, nil
 }
 
-// writeChecksumFile writes checksums to a .hash file
-func writeChecksumFile(filePath string, sha256Sum, sha512Sum string) error {
-	hashFilePath := filePath + ".hash"
-	content := fmt.Sprintf("SHA256 (%s) = %s\nSHA512 (%s) = %s\n",
-		filepath.Base(filePath), sha256Sum,
-		filepath.Base(filePath), sha512Sum)
-
-	return os.WriteFile(hashFilePath, []byte(content), 0644)
-}
-
 // getSigningPassphrase returns the passphrase for the signing key: from PBUILD_SIGNING_PASSPHRASE env, or
 // interactive prompt (no echo, like gpg). When not in a terminal, requires the env var.
 func getSigningPassphrase() ([]byte, error) {
@@ -238,6 +228,13 @@ func checkAndUpdateGitignore(workDir string) error {
 	return nil
 }
 
+// ArtifactEntry describes a single build artifact with optional checksums.
+type ArtifactEntry struct {
+	Name   string `json:"name"`
+	SHA256 string `json:"sha256,omitempty"`
+	SHA512 string `json:"sha512,omitempty"`
+}
+
 // BuildMetadata holds build information
 type BuildMetadata struct {
 	ProjectName   string                 `json:"project_name"`
@@ -252,7 +249,7 @@ type BuildMetadata struct {
 	Targets       []targets.Target       `json:"targets"`
 	BuildConfig   gobuild.BuildConfig    `json:"build_config"`
 	Flags         map[string]interface{} `json:"flags"`
-	Artifacts     []string               `json:"artifacts"`
+	Artifacts     []ArtifactEntry        `json:"artifacts"`
 	SuccessCount  int                    `json:"success_count"`
 	FailCount     int                    `json:"fail_count"`
 }
@@ -720,7 +717,7 @@ func run(targetDir string, isRetry bool) error {
 	fmt.Println()
 
 	// collect rows for summary table (errMsg used to detect vendor-related failures)
-	type row struct{ file, target, size, sha256, status, errMsg string }
+	type row struct{ file, target, size, sha256, sha512, status, errMsg string }
 	var rows []row
 
 	// status glyphs
@@ -803,6 +800,7 @@ func run(targetDir string, isRetry bool) error {
 						target: t.OS + "/" + t.Arch,
 						size:   "n/a",
 						sha256: "n/a",
+						sha512: "",
 						status: redX,
 						errMsg: errStr,
 					}
@@ -843,11 +841,12 @@ func run(targetDir string, isRetry bool) error {
 
 				sizeStr := "n/a"
 				sha256Str := "n/a"
+				sha512Str := ""
 				if sz, err := fsutil.FileSize(outPath); err == nil {
 					sizeStr = fmt.Sprintf("%s (%d)", fsutil.HumanSizeBytes(sz), sz)
 				}
 
-				// Generate checksums if requested
+				// Generate checksums if requested (stored in build-metadata.json, not .hash files)
 				if flagChecksums {
 					sha256Sum, sha512Sum, err := generateChecksums(outPath)
 					if err != nil {
@@ -855,13 +854,8 @@ func run(targetDir string, isRetry bool) error {
 							fmt.Printf("[Worker %d]   Checksum generation failed: %v\n", workerID, err)
 						}
 					} else {
-						// Write checksum file
-						if err := writeChecksumFile(outPath, sha256Sum, sha512Sum); err != nil {
-							if flagVerbose {
-								fmt.Printf("[Worker %d]   Failed to write checksum file: %v\n", workerID, err)
-							}
-						}
-						sha256Str = sha256Sum // Show full hash
+						sha256Str = sha256Sum
+						sha512Str = sha512Sum
 					}
 				}
 
@@ -883,6 +877,7 @@ func run(targetDir string, isRetry bool) error {
 					target: t.OS + "/" + t.Arch,
 					size:   sizeStr,
 					sha256: sha256Str,
+					sha512: sha512Str,
 					status: greenTick,
 				}
 			}
@@ -975,16 +970,25 @@ func run(targetDir string, isRetry bool) error {
 		username = os.Getenv("USERNAME") // Windows
 	}
 
-	// Collect artifact names
-	var artifacts []string
+	// Collect artifact names for signing and artifact entries (with hashes) for metadata
+	var artifactNames []string
+	var artifactEntries []ArtifactEntry
 	for _, r := range rows {
 		if r.status == greenTick {
-			artifacts = append(artifacts, r.file)
+			artifactNames = append(artifactNames, r.file)
+			ent := ArtifactEntry{Name: r.file}
+			if r.sha256 != "n/a" && r.sha256 != "" {
+				ent.SHA256 = r.sha256
+			}
+			if r.sha512 != "" {
+				ent.SHA512 = r.sha512
+			}
+			artifactEntries = append(artifactEntries, ent)
 		}
 	}
 
 	// GPG sign artifacts (and verify each signature)
-	if flagSign && len(artifacts) > 0 {
+	if flagSign && len(artifactNames) > 0 {
 		passphrase, err := getSigningPassphrase()
 		if err != nil {
 			return err
@@ -1006,10 +1010,10 @@ func run(targetDir string, isRetry bool) error {
 		if flagSignArmor {
 			sigExt = ".asc"
 		}
-		if err := sign.SignArtifacts(entity, versionDir, artifacts, sigExt); err != nil {
+		if err := sign.SignArtifacts(entity, versionDir, artifactNames, sigExt); err != nil {
 			return fmt.Errorf("sign artifacts: %w", err)
 		}
-		fmt.Printf("Signed %d artifact(s) with GPG (signatures verified). Wrote %s.\n\n", len(artifacts), sign.PublicKeyFilename)
+		fmt.Printf("Signed %d artifact(s) with GPG (signatures verified). Wrote %s.\n\n", len(artifactNames), sign.PublicKeyFilename)
 	}
 
 	metadata := BuildMetadata{
@@ -1072,7 +1076,7 @@ func run(targetDir string, isRetry bool) error {
 			"sign_armor":    flagSignArmor,
 			"profile":       flagProfile,
 		},
-		Artifacts:    artifacts,
+		Artifacts:    artifactEntries,
 		SuccessCount: successCount,
 		FailCount:    failCount,
 	}

@@ -363,7 +363,7 @@ builds/
     ├── myapp               # Linux/Unix binaries
     ├── myapp.exe           # Windows binaries
     ├── myapp.zst           # Compressed binaries (if --compress used)
-    ├── myapp.hash          # Checksum files (if --checksums enabled)
+    # SHA256/SHA512 checksums are in build-metadata.json under artifacts[] (if --checksums enabled)
     ├── myapp.sig           # GPG detached signatures (if --sign used; .asc with --sign-armor)
     ├── release-key.asc     # Public key for verification (if --sign used)
     └── build-metadata.json # Build information and configuration
