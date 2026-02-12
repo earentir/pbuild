@@ -32,7 +32,7 @@ import (
 	"golang.org/x/term"
 )
 
-var appVersion = "1.2.23"
+var appVersion = "1.2.25"
 
 // getBuildMode returns the appropriate build mode for the target platform
 func getBuildMode(requestedMode string) string {
