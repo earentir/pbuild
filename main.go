@@ -34,7 +34,7 @@ import (
 	"golang.org/x/term"
 )
 
-var appVersion = "1.2.25"
+var appVersion = "1.3.27"
 
 // getBuildMode returns the appropriate build mode for the target platform
 func getBuildMode(requestedMode string) string {
@@ -268,8 +268,10 @@ type ProfileTarget struct {
 	Enabled bool   `json:"enabled"`
 }
 
-const profileFilename = "pbuild-profile.json"
-const profileDirName = "builds" // profile always lives in the builds folder (not in version dir, not in custom output-dir)
+const (
+	profileFilename = "pbuild-profile.json"
+	profileDirName  = "builds" // profile always lives in the builds folder (not in version dir, not in custom output-dir)
+)
 
 // getProfileTargets loads the profile from the builds folder (workDir/builds/). If the file does not exist, it is created
 // with all default targets enabled and justCreated is true. Returns the list of enabled targets and any error.
@@ -319,28 +321,28 @@ func writeBuildMetadata(versionDir string, metadata BuildMetadata) error {
 }
 
 var (
-	flagAll          bool
-	flagName         string
-	flagOutDir       string
-	flagSetVersion   string
-	flagStrategy     string
-	flagAMD64Level   string
-	flagARM64Level   string
-	flagARMLevel     string
-	flagMIPSLevel    string
-	flagPPC64Level   string
-	flagRISCVLevel   string
-	flagBuildMode    string
-	flagTags         string
-	flagLDFlags      string
-	flagBuildFlags   string
-	flagVerbose      bool
-	flagSkipCleanup  bool
-	flagStopOnError  bool
-	flagParallel     int
-	flagCleanCache   bool
-	flagCompress     string
-	flagChecksums    bool
+	flagAll            bool
+	flagName           string
+	flagOutDir         string
+	flagSetVersion     string
+	flagStrategy       string
+	flagAMD64Level     string
+	flagARM64Level     string
+	flagARMLevel       string
+	flagMIPSLevel      string
+	flagPPC64Level     string
+	flagRISCVLevel     string
+	flagBuildMode      string
+	flagTags           string
+	flagLDFlags        string
+	flagBuildFlags     string
+	flagVerbose        bool
+	flagSkipCleanup    bool
+	flagStopOnError    bool
+	flagParallel       int
+	flagCleanCache     bool
+	flagCompress       string
+	flagChecksums      bool
 	flagReproducible   bool
 	flagVendor         bool
 	flagSign           bool
@@ -1107,37 +1109,37 @@ func run(targetDir string, isRetry bool) error {
 			UseVendor:    flagVendor,
 		},
 		Flags: map[string]interface{}{
-			"all":           flagAll,
-			"name":          flagName,
-			"output_dir":    flagOutDir,
-			"set_version":   flagSetVersion,
-			"tool_version":  appVersion,
-			"strategy":      flagStrategy,
-			"amd64_level":   flagAMD64Level,
-			"arm64_level":   flagARM64Level,
-			"arm_level":     flagARMLevel,
-			"mips_level":    flagMIPSLevel,
-			"ppc64_level":   flagPPC64Level,
-			"riscv_level":   flagRISCVLevel,
-			"buildmode":     flagBuildMode,
-			"tags":          flagTags,
-			"ldflags":       flagLDFlags,
-			"build_flags":   flagBuildFlags,
-			"verbose":       flagVerbose,
-			"skip_cleanup":  flagSkipCleanup,
-			"stop_on_error": flagStopOnError,
-			"parallel":      flagParallel,
-			"clean_cache":   flagCleanCache,
-			"compress":      flagCompress,
-			"checksums":     flagChecksums,
-			"reproducible":  flagReproducible,
-			"vendor":        flagVendor,
-			"sign":          flagSign,
+			"all":              flagAll,
+			"name":             flagName,
+			"output_dir":       flagOutDir,
+			"set_version":      flagSetVersion,
+			"tool_version":     appVersion,
+			"strategy":         flagStrategy,
+			"amd64_level":      flagAMD64Level,
+			"arm64_level":      flagARM64Level,
+			"arm_level":        flagARMLevel,
+			"mips_level":       flagMIPSLevel,
+			"ppc64_level":      flagPPC64Level,
+			"riscv_level":      flagRISCVLevel,
+			"buildmode":        flagBuildMode,
+			"tags":             flagTags,
+			"ldflags":          flagLDFlags,
+			"build_flags":      flagBuildFlags,
+			"verbose":          flagVerbose,
+			"skip_cleanup":     flagSkipCleanup,
+			"stop_on_error":    flagStopOnError,
+			"parallel":         flagParallel,
+			"clean_cache":      flagCleanCache,
+			"compress":         flagCompress,
+			"checksums":        flagChecksums,
+			"reproducible":     flagReproducible,
+			"vendor":           flagVendor,
+			"sign":             flagSign,
 			"signing_key_file": flagSigningKeyFile,
-			"signing_key":   flagSigningKey,
-			"sign_armor":    flagSignArmor,
-			"provenance":    flagProvenance,
-			"profile":       flagProfile,
+			"signing_key":      flagSigningKey,
+			"sign_armor":       flagSignArmor,
+			"provenance":       flagProvenance,
+			"profile":          flagProfile,
 		},
 		Artifacts:    artifactEntries,
 		SuccessCount: successCount,
