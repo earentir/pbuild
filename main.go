@@ -25,6 +25,7 @@ import (
 	"pbuild/gitmeta"
 	"pbuild/gobuild"
 	"pbuild/provenance"
+	"pbuild/release"
 	"pbuild/sign"
 	"pbuild/targets"
 
@@ -352,8 +353,15 @@ var (
 	flagSigningKeyFile string
 	flagSigningKey     string
 	flagSignArmor      bool
-	flagProfile        bool
-	flagProvenance     bool
+	flagProfile          bool
+	flagProvenance       bool
+	flagUploadRelease    bool
+	flagReleaseCreate    bool
+	flagReleaseRepo      string
+	flagReleaseTag       string
+	flagReleaseDraft     bool
+	flagReleaseNotes     string
+	flagReleaseNotesFile string
 )
 
 func main() {
@@ -417,6 +425,15 @@ func main() {
 
 	// SLSA provenance (in-toto attestations)
 	root.Flags().BoolVar(&flagProvenance, "provenance", false, "write SLSA provenance (provenance.intoto.jsonl) for OpenSSF/supply-chain verification")
+
+	// GitHub release upload
+	root.Flags().BoolVar(&flagUploadRelease, "upload-release", false, "upload build artifacts to a GitHub release (release must exist unless --release-create)")
+	root.Flags().BoolVar(&flagReleaseCreate, "release-create", false, "create the release if it does not exist (only with --upload-release)")
+	root.Flags().StringVar(&flagReleaseRepo, "release-repo", "", "GitHub repo owner/name (default: from git remote origin)")
+	root.Flags().StringVar(&flagReleaseTag, "release-tag", "", "release tag (default: version tag)")
+	root.Flags().BoolVar(&flagReleaseDraft, "release-draft", false, "when creating, create as draft release")
+	root.Flags().StringVar(&flagReleaseNotes, "release-notes", "", "release notes body when creating")
+	root.Flags().StringVar(&flagReleaseNotesFile, "release-notes-file", "", "path to file containing release notes when creating")
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -1156,6 +1173,71 @@ func run(targetDir string, isRetry bool) error {
 		fmt.Printf("Warning: Failed to write build metadata: %v\n", err)
 	} else {
 		fmt.Printf("Build metadata written to: %s/build-metadata.json\n\n", versionDir)
+	}
+
+	if flagUploadRelease {
+		token := os.Getenv("GITHUB_TOKEN")
+		if token == "" {
+			return fmt.Errorf("upload release: GITHUB_TOKEN is required when --upload-release is set")
+		}
+		owner, repoName := "", ""
+		if flagReleaseRepo != "" {
+			parts := strings.SplitN(flagReleaseRepo, "/", 2)
+			if len(parts) != 2 {
+				return fmt.Errorf("upload release: --release-repo must be owner/repo, got %q", flagReleaseRepo)
+			}
+			owner, repoName = parts[0], parts[1]
+		} else {
+			var err error
+			owner, repoName, err = gitmeta.RemoteOriginRepo(gitRoot)
+			if err != nil {
+				return fmt.Errorf("upload release: could not get repo from git remote: %w (use --release-repo owner/repo)", err)
+			}
+		}
+		releaseTag := flagReleaseTag
+		if releaseTag == "" {
+			releaseTag = versionTag
+		}
+		releaseID, err := release.GetReleaseByTag(owner, repoName, releaseTag, token)
+		if err != nil {
+			if err == release.ErrNotFound {
+				if !flagReleaseCreate {
+					return fmt.Errorf("upload release: no release found for tag %q; create the release first or use --release-create", releaseTag)
+				}
+				notes := flagReleaseNotes
+				if notes == "" && flagReleaseNotesFile != "" {
+					b, err := os.ReadFile(flagReleaseNotesFile)
+					if err != nil {
+						return fmt.Errorf("upload release: read release notes file: %w", err)
+					}
+					notes = string(b)
+				}
+				releaseID, err = release.CreateRelease(owner, repoName, releaseTag, releaseTag, notes, flagReleaseDraft, "HEAD", token)
+				if err != nil {
+					return fmt.Errorf("upload release: create release: %w", err)
+				}
+				fmt.Printf("Created release %s for tag %s\n", releaseTag, releaseTag)
+			} else {
+				return fmt.Errorf("upload release: get release: %w", err)
+			}
+		}
+		entries, err := os.ReadDir(versionDir)
+		if err != nil {
+			return fmt.Errorf("upload release: list version dir: %w", err)
+		}
+		var uploaded int
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			path := filepath.Join(versionDir, e.Name())
+			if err := release.UploadAsset(owner, repoName, releaseID, path, token); err != nil {
+				return fmt.Errorf("upload release: %w", err)
+			}
+			fmt.Printf("Uploaded %s\n", e.Name())
+			uploaded++
+		}
+		fmt.Printf("Uploaded %d asset(s) to release %s\n", uploaded, releaseTag)
 	}
 
 	return nil
