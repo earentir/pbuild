@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -83,4 +84,39 @@ func HeuristicDirty(repoRoot string) (bool, error) {
 
 	// If output contains "behind", repo is dirty (not in sync with remote)
 	return strings.Contains(string(output), "behind"), nil
+}
+
+// RemoteOriginRepo returns owner and repo name from git remote origin URL.
+// Supports https://github.com/owner/repo, https://github.com/owner/repo.git,
+// and git@github.com:owner/repo.git. Returns empty strings and an error if
+// origin is not set or URL cannot be parsed.
+func RemoteOriginRepo(repoRoot string) (owner, repo string, err error) {
+	cmd := exec.Command("git", "config", "remote.origin.url")
+	cmd.Dir = repoRoot
+	out, err := cmd.Output()
+	if err != nil {
+		return "", "", err
+	}
+	url := strings.TrimSpace(string(out))
+	if url == "" {
+		return "", "", errors.New("remote origin URL is empty")
+	}
+	// https://github.com/owner/repo or https://github.com/owner/repo.git
+	if strings.Contains(url, "github.com") {
+		re := regexp.MustCompile(`github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?$`)
+		matches := re.FindStringSubmatch(url)
+		if len(matches) == 3 {
+			return matches[1], strings.TrimSuffix(matches[2], ".git"), nil
+		}
+	}
+	// git@github.com:owner/repo.git
+	if strings.HasPrefix(url, "git@github.com:") {
+		trimmed := strings.TrimPrefix(url, "git@github.com:")
+		trimmed = strings.TrimSuffix(trimmed, ".git")
+		parts := strings.SplitN(trimmed, "/", 2)
+		if len(parts) == 2 {
+			return parts[0], parts[1], nil
+		}
+	}
+	return "", "", errors.New("could not parse owner/repo from remote origin URL")
 }

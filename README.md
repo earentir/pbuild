@@ -18,6 +18,7 @@ A cross-compilation tool for Go projects that builds for multiple target platfor
 - **GPG signing** (`--sign`): create detached signatures (`.sig` or `.asc`) for each artifact using a pure-Go OpenPGP implementation; each signature is verified after creation
 - **SLSA provenance** (`--provenance`): write a single `provenance.intoto.jsonl` (one in-toto Statement per artifact) for OpenSSF/supply-chain verification; can be signed with `--sign`
 - **Profile** (`--profile`): use a saved target list from `builds/pbuild-profile.json`; on first run the file is created with all targets enabled—edit it to set `"enabled": false` for targets you don't want; subsequent builds use only enabled targets
+- **GitHub release upload** (`--upload-release`): upload all artifacts in the version directory to an existing GitHub release (by tag); use `--release-create` to create the release if it does not exist; requires `GITHUB_TOKEN`
 
 ## Installation
 
@@ -62,6 +63,16 @@ pbuild --all --sign --signing-key-file ./release-key.asc
 Use a profile to build only the targets you want (first run creates `builds/pbuild-profile.json` with all targets enabled; edit to disable, then run again):
 ```bash
 pbuild --profile
+```
+
+Upload build artifacts to an existing GitHub release (repo from git remote; tag defaults to version tag):
+```bash
+GITHUB_TOKEN=ghp_xxx pbuild --all --upload-release
+```
+
+Create the release if it does not exist, then upload:
+```bash
+GITHUB_TOKEN=ghp_xxx pbuild --all --upload-release --release-create --release-tag v1.0.0
 ```
 
 ### Example Runs
@@ -240,6 +251,13 @@ Flags:
       --provenance            write SLSA provenance (provenance.intoto.jsonl) for OpenSSF/supply-chain verification
       --profile               use target list from builds/pbuild-profile.json (create on first run; edit to disable targets)
       --set-version string    override embedded version tag
+      --upload-release        upload build artifacts to a GitHub release (release must exist unless --release-create)
+      --release-create        create the release if it does not exist (only with --upload-release)
+      --release-repo string   GitHub repo as owner/name (default: from git remote origin)
+      --release-tag string    release tag (default: version tag)
+      --release-draft         when creating, create as draft release
+      --release-notes string  release notes body when creating
+      --release-notes-file string  path to file containing release notes when creating
 ```
 
 ## Profile (saved target list)
@@ -400,6 +418,28 @@ With `--provenance`, pbuild writes a single **SLSA build provenance** file (`pro
 **OpenSSF Scorecard**: The “Signed-Releases” check looks for **signed release assets** (e.g. `.sig`/`.asc` next to binaries). Use `--sign` for that. Provenance does not replace signing; it adds verifiable build metadata.
 
 **Verification**: Downstreams can open `provenance.intoto.jsonl`, verify its signature (if present), then parse each line as a JSON Statement and check `subject[].digest` against the corresponding artifact. Tools like [slsa-verifier](https://github.com/slsa-framework/slsa-verifier) can be used with a policy that accepts pbuild’s build type and builder ID.
+
+## GitHub release upload
+
+With `--upload-release`, pbuild uploads **all files** in the version build directory (binaries, checksums, signatures, provenance, build-metadata.json, etc.) to a GitHub release. This uses the GitHub REST API; no `gh` CLI is required.
+
+- **Default (update only)**: The release for the given tag must already exist. pbuild gets that release and uploads each file as an asset. If no release exists, pbuild exits with an error and suggests using `--release-create`.
+- **`--release-create`**: If the release does not exist, pbuild creates it (with optional `--release-draft` and `--release-notes` or `--release-notes-file`), then uploads assets. The tag is created at `HEAD` if it does not exist.
+- **Repo**: Inferred from `git config remote.origin.url` (supports `https://github.com/owner/repo` and `git@github.com:owner/repo.git`). Override with `--release-repo owner/repo`.
+- **Tag**: Defaults to the version tag (e.g. `1.3.27-6276843-dirty`). Override with `--release-tag` (e.g. `v1.3.27`) for a cleaner release tag.
+- **Auth**: Set the `GITHUB_TOKEN` environment variable (e.g. a fine-grained or classic PAT with `repo` scope). Required when `--upload-release` is set.
+
+Example: build, sign, add provenance, then upload to an existing release tagged `v1.0.0`:
+
+```bash
+GITHUB_TOKEN=ghp_xxx pbuild --all --sign --signing-key-file ./release-key.asc --provenance --upload-release --release-tag v1.0.0
+```
+
+For the first release, create it then upload:
+
+```bash
+GITHUB_TOKEN=ghp_xxx pbuild --all --upload-release --release-create --release-tag v1.0.0 --release-notes "First release."
+```
 
 ## .gitignore Management
 
