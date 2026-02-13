@@ -92,7 +92,7 @@ func BuildWithConfig(ctx context.Context, workDir string, t targets.Target, outp
 	if config.CleanCache {
 		cleanCmd := exec.CommandContext(ctx, "go", "clean", "-cache")
 		cleanCmd.Dir = workDir
-		cleanCmd.Run() // Ignore errors, cache cleaning is best effort
+		_ = cleanCmd.Run() // cache clean is best-effort; ignore error
 	}
 
 	// Build command arguments
