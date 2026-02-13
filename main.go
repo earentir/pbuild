@@ -796,9 +796,12 @@ func run(targetDir string, isRetry bool) error {
 					UseVendor:    flagVendor,
 				}
 
-				// Set default ldflags if not provided
+				// Always inject version+hash so built binary --version shows it (last -X wins).
+				versionInject := "-X main.appVersion=" + versionTag + " -X main.Version=" + versionTag
 				if config.LDFlags == "" {
-					config.LDFlags = "-s -w -X main.appVersion=" + versionTag
+					config.LDFlags = "-s -w " + versionInject
+				} else {
+					config.LDFlags = config.LDFlags + " " + versionInject
 				}
 
 				if err := gobuild.BuildWithConfig(ctx, workDir, t, outPath, config); err != nil {
