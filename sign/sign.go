@@ -22,7 +22,9 @@ func LoadSigningEntity(keyFilePath, keyID string, passphrase []byte) (*openpgp.E
 	if err != nil {
 		return nil, fmt.Errorf("open signing key file: %w", err)
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Close()
+	}()
 
 	el, err := openpgp.ReadArmoredKeyRing(f)
 	if err != nil {
@@ -80,13 +82,13 @@ func ExportPublicKey(entity *openpgp.Entity, outPath string) error {
 	if err != nil {
 		return fmt.Errorf("create public key file: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	w, err := armor.Encode(f, openpgp.PublicKeyType, nil)
 	if err != nil {
 		return fmt.Errorf("armor encode: %w", err)
 	}
 	if err := entity.Serialize(w); err != nil {
-		w.Close()
+		_ = w.Close()
 		return fmt.Errorf("serialize public key: %w", err)
 	}
 	if err := w.Close(); err != nil {
@@ -102,13 +104,13 @@ func SignFile(entity *openpgp.Entity, artifactPath, sigPath string, armored bool
 	if err != nil {
 		return fmt.Errorf("open artifact: %w", err)
 	}
-	defer art.Close()
+	defer func() { _ = art.Close() }()
 
 	sig, err := os.Create(sigPath)
 	if err != nil {
 		return fmt.Errorf("create signature file: %w", err)
 	}
-	defer sig.Close()
+	defer func() { _ = sig.Close() }()
 
 	config := &packet.Config{}
 	if armored {
@@ -129,13 +131,13 @@ func VerifySignature(entity *openpgp.Entity, artifactPath, sigPath string, armor
 	if err != nil {
 		return fmt.Errorf("open artifact: %w", err)
 	}
-	defer art.Close()
+	defer func() { _ = art.Close() }()
 
 	sig, err := os.Open(sigPath)
 	if err != nil {
 		return fmt.Errorf("open signature file: %w", err)
 	}
-	defer sig.Close()
+	defer func() { _ = sig.Close() }()
 
 	keyring := openpgp.EntityList{entity}
 	var signer *openpgp.Entity

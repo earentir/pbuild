@@ -1,3 +1,4 @@
+// Package main provides pbuild, a cross-compilation tool for Go projects.
 package main
 
 import (
@@ -63,20 +64,20 @@ func compressFile(inputPath, outputPath, method string, deterministic bool) erro
 	if err != nil {
 		return err
 	}
-	defer inputFile.Close()
+	defer func() { _ = inputFile.Close() }()
 
 	outputFile, err := os.Create(outputPath)
 	if err != nil {
 		return err
 	}
-	defer outputFile.Close()
+	defer func() { _ = outputFile.Close() }()
 
 	var writer io.Writer
 	switch method {
 	case "gzip":
 		gz := gzip.NewWriter(outputFile)
 		if deterministic {
-			gz.Header.ModTime = time.Unix(0, 0)
+			gz.ModTime = time.Unix(0, 0)
 		}
 		writer = gz
 	case "zstd":
@@ -110,7 +111,7 @@ func generateChecksums(filePath string) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	// Create hash writers
 	sha256Hash := sha256.New()
@@ -262,6 +263,7 @@ type ProfileConfig struct {
 	Targets []ProfileTarget `json:"targets"`
 }
 
+// ProfileTarget represents one OS/arch target in the profile and whether it is enabled.
 type ProfileTarget struct {
 	OS      string `json:"os"`
 	Arch    string `json:"arch"`
@@ -359,7 +361,7 @@ func main() {
 		Short:        "Cross-compile a Go project for a target matrix",
 		Args:         cobra.MaximumNArgs(1),
 		SilenceUsage: true, // do not print usage on build errors
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, args []string) error {
 			target := "."
 			if len(args) == 1 {
 				target = args[0]
@@ -532,7 +534,7 @@ func renderTablesSideBySide(buildTbl, cpuTbl, behaviorTbl *tablewriter.Table) {
 		buildData = append(buildData, []any{"Compression", flagCompress})
 	}
 	_ = buildCapture.Bulk(buildData)
-	buildCapture.Render()
+	_ = buildCapture.Render()
 	outputs = append(outputs, buildBuf.String())
 
 	// CPU Levels table
@@ -554,7 +556,7 @@ func renderTablesSideBySide(buildTbl, cpuTbl, behaviorTbl *tablewriter.Table) {
 		{"RISC-V", flagRISCVLevel},
 	}
 	_ = cpuCapture.Bulk(cpuData)
-	cpuCapture.Render()
+	_ = cpuCapture.Render()
 	outputs = append(outputs, cpuBuf.String())
 
 	// Behavior table
@@ -581,7 +583,7 @@ func renderTablesSideBySide(buildTbl, cpuTbl, behaviorTbl *tablewriter.Table) {
 		{"Profile", fmt.Sprintf("%t", flagProfile)},
 	}
 	_ = behaviorCapture.Bulk(behaviorData)
-	behaviorCapture.Render()
+	_ = behaviorCapture.Render()
 	outputs = append(outputs, behaviorBuf.String())
 
 	// Split each output into lines and print them side by side
@@ -835,7 +837,7 @@ func run(targetDir string, isRetry bool) error {
 						}
 					} else {
 						// Remove original file after successful compression
-						os.Remove(outPath)
+						_ = os.Remove(outPath)
 						outPath = compressedPath
 						if flagVerbose {
 							fmt.Printf("[Worker %d]   Compressed to %s\n", workerID, compressedPath)
