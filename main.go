@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/sha512"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"pbuild/fsutil"
 	"pbuild/gitmeta"
 	"pbuild/gobuild"
+	"pbuild/provenance"
 	"pbuild/sign"
 	"pbuild/targets"
 	"runtime"
@@ -32,7 +34,7 @@ import (
 	"golang.org/x/term"
 )
 
-var appVersion = "1.2.25"
+var appVersion = "1.3.27"
 
 // getBuildMode returns the appropriate build mode for the target platform
 func getBuildMode(requestedMode string) string {
@@ -266,8 +268,10 @@ type ProfileTarget struct {
 	Enabled bool   `json:"enabled"`
 }
 
-const profileFilename = "pbuild-profile.json"
-const profileDirName = "builds" // profile always lives in the builds folder (not in version dir, not in custom output-dir)
+const (
+	profileFilename = "pbuild-profile.json"
+	profileDirName  = "builds" // profile always lives in the builds folder (not in version dir, not in custom output-dir)
+)
 
 // getProfileTargets loads the profile from the builds folder (workDir/builds/). If the file does not exist, it is created
 // with all default targets enabled and justCreated is true. Returns the list of enabled targets and any error.
@@ -317,28 +321,28 @@ func writeBuildMetadata(versionDir string, metadata BuildMetadata) error {
 }
 
 var (
-	flagAll          bool
-	flagName         string
-	flagOutDir       string
-	flagSetVersion   string
-	flagStrategy     string
-	flagAMD64Level   string
-	flagARM64Level   string
-	flagARMLevel     string
-	flagMIPSLevel    string
-	flagPPC64Level   string
-	flagRISCVLevel   string
-	flagBuildMode    string
-	flagTags         string
-	flagLDFlags      string
-	flagBuildFlags   string
-	flagVerbose      bool
-	flagSkipCleanup  bool
-	flagStopOnError  bool
-	flagParallel     int
-	flagCleanCache   bool
-	flagCompress     string
-	flagChecksums    bool
+	flagAll            bool
+	flagName           string
+	flagOutDir         string
+	flagSetVersion     string
+	flagStrategy       string
+	flagAMD64Level     string
+	flagARM64Level     string
+	flagARMLevel       string
+	flagMIPSLevel      string
+	flagPPC64Level     string
+	flagRISCVLevel     string
+	flagBuildMode      string
+	flagTags           string
+	flagLDFlags        string
+	flagBuildFlags     string
+	flagVerbose        bool
+	flagSkipCleanup    bool
+	flagStopOnError    bool
+	flagParallel       int
+	flagCleanCache     bool
+	flagCompress       string
+	flagChecksums      bool
 	flagReproducible   bool
 	flagVendor         bool
 	flagSign           bool
@@ -346,6 +350,7 @@ var (
 	flagSigningKey     string
 	flagSignArmor      bool
 	flagProfile        bool
+	flagProvenance     bool
 )
 
 func main() {
@@ -406,6 +411,9 @@ func main() {
 
 	// Profile: use saved target list from builds folder (create on first run, then build only enabled)
 	root.Flags().BoolVar(&flagProfile, "profile", false, "use profile: build targets from "+profileDirName+"/"+profileFilename+" (create with all enabled on first run; edit to disable targets)")
+
+	// SLSA provenance (in-toto attestations)
+	root.Flags().BoolVar(&flagProvenance, "provenance", false, "write SLSA provenance (provenance.intoto.jsonl) for OpenSSF/supply-chain verification")
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -483,6 +491,7 @@ func showConfigTables() {
 		{"Reproducible", fmt.Sprintf("%t", flagReproducible)},
 		{"Vendor", fmt.Sprintf("%t", flagVendor)},
 		{"Sign", fmt.Sprintf("%t", flagSign)},
+		{"Provenance", fmt.Sprintf("%t", flagProvenance)},
 		{"Profile", fmt.Sprintf("%t", flagProfile)},
 	}
 	_ = behaviorTbl.Bulk(behaviorData)
@@ -568,6 +577,7 @@ func renderTablesSideBySide(buildTbl, cpuTbl, behaviorTbl *tablewriter.Table) {
 		{"Reproducible", fmt.Sprintf("%t", flagReproducible)},
 		{"Vendor", fmt.Sprintf("%t", flagVendor)},
 		{"Sign", fmt.Sprintf("%t", flagSign)},
+		{"Provenance", fmt.Sprintf("%t", flagProvenance)},
 		{"Profile", fmt.Sprintf("%t", flagProfile)},
 	}
 	_ = behaviorCapture.Bulk(behaviorData)
@@ -987,6 +997,53 @@ func run(targetDir string, isRetry bool) error {
 		}
 	}
 
+	// SLSA provenance: single provenance.intoto.jsonl with one Statement per artifact
+	var provenancePath string
+	if flagProvenance && len(artifactEntries) > 0 {
+		h := sha256.Sum256([]byte(versionTag + "|" + projectName + "|" + startTime.UTC().Format(time.RFC3339Nano)))
+		invocationID := hex.EncodeToString(h[:])[:32]
+		targetList := make([]provenance.Target, len(matrix))
+		for i, t := range matrix {
+			targetList[i] = provenance.Target{OS: t.OS, Arch: t.Arch}
+		}
+		artifacts := make([]provenance.Artifact, len(artifactEntries))
+		for i, e := range artifactEntries {
+			artifacts[i] = provenance.Artifact{Name: e.Name, SHA256: e.SHA256, SHA512: e.SHA512}
+		}
+		externalParams := map[string]interface{}{
+			"version": versionTag, "project": projectName, "strategy": flagStrategy,
+			"output_dir": flagOutDir, "compress": flagCompress, "checksums": flagChecksums,
+			"reproducible": flagReproducible, "vendor": flagVendor, "profile": flagProfile,
+		}
+		internalParams := map[string]interface{}{
+			"host": hostname, "user": username, "go_version": runtime.Version(),
+			"pbuild_version": appVersion, "build_os": runtime.GOOS, "build_arch": runtime.GOARCH,
+			"parallel": flagParallel,
+		}
+		path, err := provenance.Write(&provenance.Inputs{
+			VersionDir:     versionDir,
+			InvocationID:   invocationID,
+			StartedOn:      startTime,
+			FinishedOn:     buildTime,
+			ProjectName:    projectName,
+			VersionTag:     versionTag,
+			Hostname:       hostname,
+			Username:       username,
+			GoVersion:      runtime.Version(),
+			PbuildVersion:  appVersion,
+			ExternalParams: externalParams,
+			InternalParams: internalParams,
+			Targets:        targetList,
+			Artifacts:      artifacts,
+		})
+		if err != nil {
+			fmt.Printf("Warning: Failed to write provenance: %v\n", err)
+		} else {
+			provenancePath = path
+			fmt.Printf("Provenance written to: %s\n\n", path)
+		}
+	}
+
 	// GPG sign artifacts (and verify each signature)
 	if flagSign && len(artifactNames) > 0 {
 		passphrase, err := getSigningPassphrase()
@@ -1012,6 +1069,13 @@ func run(targetDir string, isRetry bool) error {
 		}
 		if err := sign.SignArtifacts(entity, versionDir, artifactNames, sigExt); err != nil {
 			return fmt.Errorf("sign artifacts: %w", err)
+		}
+		if provenancePath != "" {
+			sigPath := sign.SignaturePath(provenancePath, sigExt)
+			if err := sign.SignAndVerify(entity, provenancePath, sigPath, sigExt); err != nil {
+				return fmt.Errorf("sign provenance: %w", err)
+			}
+			fmt.Printf("Signed provenance: %s\n", sigPath)
 		}
 		fmt.Printf("Signed %d artifact(s) with GPG (signatures verified). Wrote %s.\n\n", len(artifactNames), sign.PublicKeyFilename)
 	}
@@ -1045,36 +1109,37 @@ func run(targetDir string, isRetry bool) error {
 			UseVendor:    flagVendor,
 		},
 		Flags: map[string]interface{}{
-			"all":           flagAll,
-			"name":          flagName,
-			"output_dir":    flagOutDir,
-			"set_version":   flagSetVersion,
-			"tool_version":  appVersion,
-			"strategy":      flagStrategy,
-			"amd64_level":   flagAMD64Level,
-			"arm64_level":   flagARM64Level,
-			"arm_level":     flagARMLevel,
-			"mips_level":    flagMIPSLevel,
-			"ppc64_level":   flagPPC64Level,
-			"riscv_level":   flagRISCVLevel,
-			"buildmode":     flagBuildMode,
-			"tags":          flagTags,
-			"ldflags":       flagLDFlags,
-			"build_flags":   flagBuildFlags,
-			"verbose":       flagVerbose,
-			"skip_cleanup":  flagSkipCleanup,
-			"stop_on_error": flagStopOnError,
-			"parallel":      flagParallel,
-			"clean_cache":   flagCleanCache,
-			"compress":      flagCompress,
-			"checksums":     flagChecksums,
-			"reproducible":  flagReproducible,
-			"vendor":        flagVendor,
-			"sign":          flagSign,
+			"all":              flagAll,
+			"name":             flagName,
+			"output_dir":       flagOutDir,
+			"set_version":      flagSetVersion,
+			"tool_version":     appVersion,
+			"strategy":         flagStrategy,
+			"amd64_level":      flagAMD64Level,
+			"arm64_level":      flagARM64Level,
+			"arm_level":        flagARMLevel,
+			"mips_level":       flagMIPSLevel,
+			"ppc64_level":      flagPPC64Level,
+			"riscv_level":      flagRISCVLevel,
+			"buildmode":        flagBuildMode,
+			"tags":             flagTags,
+			"ldflags":          flagLDFlags,
+			"build_flags":      flagBuildFlags,
+			"verbose":          flagVerbose,
+			"skip_cleanup":     flagSkipCleanup,
+			"stop_on_error":    flagStopOnError,
+			"parallel":         flagParallel,
+			"clean_cache":      flagCleanCache,
+			"compress":         flagCompress,
+			"checksums":        flagChecksums,
+			"reproducible":     flagReproducible,
+			"vendor":           flagVendor,
+			"sign":             flagSign,
 			"signing_key_file": flagSigningKeyFile,
-			"signing_key":   flagSigningKey,
-			"sign_armor":    flagSignArmor,
-			"profile":       flagProfile,
+			"signing_key":      flagSigningKey,
+			"sign_armor":       flagSignArmor,
+			"provenance":       flagProvenance,
+			"profile":          flagProfile,
 		},
 		Artifacts:    artifactEntries,
 		SuccessCount: successCount,

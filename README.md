@@ -16,6 +16,7 @@ A cross-compilation tool for Go projects that builds for multiple target platfor
 - **Reproducible builds** (`--reproducible`): same code produces the same binary hash; forces `-trimpath` and deterministic gzip
 - **Vendor support** (`--vendor`): build with `-mod=vendor`; creates `vendor/` if missing; prompts to re-vendor and retry when builds fail due to out-of-date vendored packages
 - **GPG signing** (`--sign`): create detached signatures (`.sig` or `.asc`) for each artifact using a pure-Go OpenPGP implementation; each signature is verified after creation
+- **SLSA provenance** (`--provenance`): write a single `provenance.intoto.jsonl` (one in-toto Statement per artifact) for OpenSSF/supply-chain verification; can be signed with `--sign`
 - **Profile** (`--profile`): use a saved target list from `builds/pbuild-profile.json`; on first run the file is created with all targets enabled—edit it to set `"enabled": false` for targets you don't want; subsequent builds use only enabled targets
 
 ## Installation
@@ -236,6 +237,7 @@ Flags:
       --signing-key-file path path to armored private key file (required when --sign)
       --signing-key id        key ID (hex) when key file contains multiple keys
       --sign-armor            output ASCII-armored signatures (.asc) instead of binary (.sig)
+      --provenance            write SLSA provenance (provenance.intoto.jsonl) for OpenSSF/supply-chain verification
       --profile               use target list from builds/pbuild-profile.json (create on first run; edit to disable targets)
       --set-version string    override embedded version tag
 ```
@@ -366,8 +368,38 @@ builds/
     # SHA256/SHA512 checksums are in build-metadata.json under artifacts[] (if --checksums enabled)
     ├── myapp.sig           # GPG detached signatures (if --sign used; .asc with --sign-armor)
     ├── release-key.asc     # Public key for verification (if --sign used)
+    ├── provenance.intoto.jsonl   # SLSA provenance (if --provenance used; one Statement per line)
+    ├── provenance.intoto.jsonl.sig  # Signature for provenance (if --sign and --provenance)
     └── build-metadata.json # Build information and configuration
 ```
+
+## SLSA provenance and OpenSSF
+
+pbuild supports [OpenSSF](https://openssf.org/) (Open Source Security Foundation) goals for signed releases and supply-chain transparency. For **OpenSSF-aligned releases**, use **both** `--sign` and `--provenance` when building:
+
+- **`--sign`**: Produces GPG detached signatures for every artifact (and for the provenance file). This is what the OpenSSF Scorecard **Signed-Releases** check looks for; without signed assets, that check does not pass.
+- **`--provenance`**: Produces SLSA build provenance so consumers can verify how and where each artifact was built. Signed provenance gives full supply-chain attestation.
+
+**Recommended for releases:**
+
+```bash
+pbuild --all --sign --signing-key-file ./release-key.asc --provenance
+```
+
+Upload the resulting binaries, their `.sig`/`.asc` files, `release-key.asc`, and `provenance.intoto.jsonl` (plus `provenance.intoto.jsonl.sig`) to your release page so the OpenSSF Scorecard and downstream verifiers can use them.
+
+---
+
+With `--provenance`, pbuild writes a single **SLSA build provenance** file (`provenance.intoto.jsonl`) in the version directory. This helps with supply-chain verification and aligns with [OpenSSF](https://openssf.org/) and [SLSA](https://slsa.dev/) practices.
+
+- **Format**: [in-toto Statement](https://github.com/in-toto/attestation) v1 with predicate type `https://slsa.dev/provenance/v1`. One JSON Line per built artifact (same build predicate; each line’s `subject` is one artifact).
+- **Content**: Build definition (build type, external/internal parameters), run details (builder ID, invocation ID, timestamps), and per-artifact subject (name + sha256/sha512 digest).
+- **Build type URI**: `https://github.com/earentir/pbuild/slsa-buildtype/v1` — identifies pbuild as the build system so verifiers can validate expectations.
+- **Signing**: If you also use `--sign`, pbuild signs `provenance.intoto.jsonl` (e.g. `provenance.intoto.jsonl.sig`) with the same GPG key so the attestations are verifiable.
+
+**OpenSSF Scorecard**: The “Signed-Releases” check looks for **signed release assets** (e.g. `.sig`/`.asc` next to binaries). Use `--sign` for that. Provenance does not replace signing; it adds verifiable build metadata.
+
+**Verification**: Downstreams can open `provenance.intoto.jsonl`, verify its signature (if present), then parse each line as a JSON Statement and check `subject[].digest` against the corresponding artifact. Tools like [slsa-verifier](https://github.com/slsa-framework/slsa-verifier) can be used with a policy that accepts pbuild’s build type and builder ID.
 
 ## .gitignore Management
 
