@@ -14,6 +14,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"time"
+	"unicode/utf8"
+
 	"pbuild/appver"
 	"pbuild/fsutil"
 	"pbuild/gitmeta"
@@ -21,11 +27,6 @@ import (
 	"pbuild/provenance"
 	"pbuild/sign"
 	"pbuild/targets"
-	"runtime"
-	"strings"
-	"sync"
-	"time"
-	"unicode/utf8"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/olekukonko/tablewriter"
@@ -220,7 +221,7 @@ func checkAndUpdateGitignore(workDir string) error {
 		}
 		newContent += "builds/\n"
 
-		if err := os.WriteFile(gitignorePath, []byte(newContent), 0644); err != nil {
+		if err := os.WriteFile(gitignorePath, []byte(newContent), 0o644); err != nil {
 			return fmt.Errorf("failed to update .gitignore file: %v", err)
 		}
 		fmt.Println("Added builds/ to .gitignore file")
@@ -295,7 +296,7 @@ func getProfileTargets(workDir string) (matrix []targets.Target, justCreated boo
 		if err := os.MkdirAll(profileDir, 0o755); err != nil {
 			return nil, false, fmt.Errorf("create builds dir for profile: %w", err)
 		}
-		if err := os.WriteFile(path, body, 0644); err != nil {
+		if err := os.WriteFile(path, body, 0o644); err != nil {
 			return nil, false, fmt.Errorf("write profile: %w", err)
 		}
 		return def, true, nil
@@ -319,7 +320,7 @@ func writeBuildMetadata(versionDir string, metadata BuildMetadata) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(metadataPath, data, 0644)
+	return os.WriteFile(metadataPath, data, 0o644)
 }
 
 var (
@@ -503,7 +504,7 @@ func showConfigTables() {
 }
 
 // renderTablesSideBySide renders tablewriter tables side by side
-func renderTablesSideBySide(buildTbl, cpuTbl, behaviorTbl *tablewriter.Table) {
+func renderTablesSideBySide(_, _, _ *tablewriter.Table) {
 	// Capture output from each table by creating new tables with buffers
 	var outputs []string
 
