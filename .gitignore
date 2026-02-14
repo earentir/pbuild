@@ -32,3 +32,6 @@ go.work.sum
 # .vscode/
 builds/
 pbuild
+
+# Snyk Security Extension - AI Rules (auto-generated)
+.cursor/rules/snyk_rules.mdc
