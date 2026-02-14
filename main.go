@@ -362,6 +362,11 @@ var (
 	flagReleaseDraft     bool
 	flagReleaseNotes     string
 	flagReleaseNotesFile string
+
+	// Upload subcommand only
+	flagUploadVersion   string
+	flagUploadVersionDir string
+	flagUploadList     bool
 )
 
 func main() {
@@ -430,10 +435,30 @@ func main() {
 	root.Flags().BoolVar(&flagUploadRelease, "upload-release", false, "upload build artifacts to a GitHub release (release must exist unless --release-create)")
 	root.Flags().BoolVar(&flagReleaseCreate, "release-create", false, "create the release if it does not exist (only with --upload-release)")
 	root.Flags().StringVar(&flagReleaseRepo, "release-repo", "", "GitHub repo owner/name (default: from git remote origin)")
-	root.Flags().StringVar(&flagReleaseTag, "release-tag", "", "release tag (default: version tag)")
+	root.Flags().StringVar(&flagReleaseTag, "release-tag", "", "release tag (default: v + version, e.g. v1.3.27-ab5bb44)")
 	root.Flags().BoolVar(&flagReleaseDraft, "release-draft", false, "when creating, create as draft release")
 	root.Flags().StringVar(&flagReleaseNotes, "release-notes", "", "release notes body when creating")
 	root.Flags().StringVar(&flagReleaseNotesFile, "release-notes-file", "", "path to file containing release notes when creating")
+
+	// Upload subcommand: upload an existing build to GitHub (no build step)
+	uploadCmd := &cobra.Command{
+		Use:   "upload [VERSION]",
+		Short: "Upload an existing build to a GitHub release",
+		Long:  "Upload artifacts from a version directory (from a previous build) to a GitHub release. Specify which build with VERSION, --version, or --version-dir; use --list to see available builds.",
+		Args:  cobra.MaximumNArgs(1),
+		RunE:  runUploadCmd,
+	}
+	uploadCmd.Flags().StringVarP(&flagUploadVersion, "version", "v", "", "version name (e.g. 1.3.27-ab5bb44); uploads from output-dir/VERSION")
+	uploadCmd.Flags().StringVar(&flagUploadVersionDir, "version-dir", "", "path to build directory (absolute or relative)")
+	uploadCmd.Flags().BoolVar(&flagUploadList, "list", false, "list available version directories and exit")
+	uploadCmd.Flags().StringVar(&flagOutDir, "output-dir", "builds", "directory containing version subdirs (for --version and --list)")
+	uploadCmd.Flags().BoolVar(&flagReleaseCreate, "release-create", false, "create the release if it does not exist")
+	uploadCmd.Flags().StringVar(&flagReleaseRepo, "release-repo", "", "GitHub repo owner/name (default: from git remote origin)")
+	uploadCmd.Flags().StringVar(&flagReleaseTag, "release-tag", "", "release tag (default: v + version)")
+	uploadCmd.Flags().BoolVar(&flagReleaseDraft, "release-draft", false, "when creating, create as draft release")
+	uploadCmd.Flags().StringVar(&flagReleaseNotes, "release-notes", "", "release notes body when creating")
+	uploadCmd.Flags().StringVar(&flagReleaseNotesFile, "release-notes-file", "", "path to file containing release notes when creating")
+	root.AddCommand(uploadCmd)
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -1176,69 +1201,163 @@ func run(targetDir string, isRetry bool) error {
 	}
 
 	if flagUploadRelease {
-		token := os.Getenv("GITHUB_TOKEN")
-		if token == "" {
-			return fmt.Errorf("upload release: GITHUB_TOKEN is required when --upload-release is set")
+		if err := runUpload(gitRoot, versionDir, versionTag); err != nil {
+			return err
 		}
-		owner, repoName := "", ""
-		if flagReleaseRepo != "" {
-			parts := strings.SplitN(flagReleaseRepo, "/", 2)
-			if len(parts) != 2 {
-				return fmt.Errorf("upload release: --release-repo must be owner/repo, got %q", flagReleaseRepo)
-			}
-			owner, repoName = parts[0], parts[1]
-		} else {
-			var err error
-			owner, repoName, err = gitmeta.RemoteOriginRepo(gitRoot)
-			if err != nil {
-				return fmt.Errorf("upload release: could not get repo from git remote: %w (use --release-repo owner/repo)", err)
-			}
-		}
-		releaseTag := flagReleaseTag
-		if releaseTag == "" {
-			releaseTag = versionTag
-		}
-		releaseID, err := release.GetReleaseByTag(owner, repoName, releaseTag, token)
-		if err != nil {
-			if err == release.ErrNotFound {
-				if !flagReleaseCreate {
-					return fmt.Errorf("upload release: no release found for tag %q; create the release first or use --release-create", releaseTag)
-				}
-				notes := flagReleaseNotes
-				if notes == "" && flagReleaseNotesFile != "" {
-					b, err := os.ReadFile(flagReleaseNotesFile)
-					if err != nil {
-						return fmt.Errorf("upload release: read release notes file: %w", err)
-					}
-					notes = string(b)
-				}
-				releaseID, err = release.CreateRelease(owner, repoName, releaseTag, releaseTag, notes, flagReleaseDraft, "HEAD", token)
-				if err != nil {
-					return fmt.Errorf("upload release: create release: %w", err)
-				}
-				fmt.Printf("Created release %s for tag %s\n", releaseTag, releaseTag)
-			} else {
-				return fmt.Errorf("upload release: get release: %w", err)
-			}
-		}
-		entries, err := os.ReadDir(versionDir)
-		if err != nil {
-			return fmt.Errorf("upload release: list version dir: %w", err)
-		}
-		var uploaded int
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			path := filepath.Join(versionDir, e.Name())
-			if err := release.UploadAsset(owner, repoName, releaseID, path, token); err != nil {
-				return fmt.Errorf("upload release: %w", err)
-			}
-			fmt.Printf("Uploaded %s\n", e.Name())
-			uploaded++
-		}
-		fmt.Printf("Uploaded %d asset(s) to release %s\n", uploaded, releaseTag)
 	}
 
 	return nil
+}
+
+// runUpload uploads the contents of versionDir to a GitHub release. versionTag is used as the
+// default release tag (with "v" prefix if needed). Caller must ensure versionDir exists.
+func runUpload(gitRoot, versionDir, versionTag string) error {
+	token := os.Getenv("GITHUB_TOKEN")
+	if token == "" {
+		return fmt.Errorf("upload release: GITHUB_TOKEN is required")
+	}
+	owner, repoName := "", ""
+	if flagReleaseRepo != "" {
+		parts := strings.SplitN(flagReleaseRepo, "/", 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("upload release: --release-repo must be owner/repo, got %q", flagReleaseRepo)
+		}
+		owner, repoName = parts[0], parts[1]
+	} else {
+		var err error
+		owner, repoName, err = gitmeta.RemoteOriginRepo(gitRoot)
+		if err != nil {
+			return fmt.Errorf("upload release: could not get repo from git remote: %w (use --release-repo owner/repo)", err)
+		}
+	}
+	releaseTag := flagReleaseTag
+	if releaseTag == "" {
+		if strings.HasPrefix(versionTag, "v") {
+			releaseTag = versionTag
+		} else {
+			releaseTag = "v" + versionTag
+		}
+	}
+	releaseID, err := release.GetReleaseByTag(owner, repoName, releaseTag, token)
+	if err != nil {
+		if err == release.ErrNotFound {
+			if !flagReleaseCreate {
+				return fmt.Errorf("upload release: no release found for tag %q; create the release first or use --release-create", releaseTag)
+			}
+			notes := flagReleaseNotes
+			if notes == "" && flagReleaseNotesFile != "" {
+				b, err := os.ReadFile(flagReleaseNotesFile)
+				if err != nil {
+					return fmt.Errorf("upload release: read release notes file: %w", err)
+				}
+				notes = string(b)
+			}
+			releaseID, err = release.CreateRelease(owner, repoName, releaseTag, releaseTag, notes, flagReleaseDraft, "HEAD", token)
+			if err != nil {
+				return fmt.Errorf("upload release: create release: %w", err)
+			}
+			fmt.Printf("Created release %s for tag %s\n", releaseTag, releaseTag)
+		} else {
+			return fmt.Errorf("upload release: get release: %w", err)
+		}
+	}
+	entries, err := os.ReadDir(versionDir)
+	if err != nil {
+		return fmt.Errorf("upload release: list version dir: %w", err)
+	}
+	var uploaded int
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		path := filepath.Join(versionDir, e.Name())
+		if err := release.UploadAsset(owner, repoName, releaseID, path, token); err != nil {
+			return fmt.Errorf("upload release: %w", err)
+		}
+		fmt.Printf("Uploaded %s\n", e.Name())
+		uploaded++
+	}
+	fmt.Printf("Uploaded %d asset(s) to release %s\n", uploaded, releaseTag)
+	return nil
+}
+
+func runUploadCmd(_ *cobra.Command, args []string) error {
+	target := "."
+	if len(args) == 1 {
+		target = args[0]
+	}
+	abs, err := filepath.Abs(target)
+	if err != nil {
+		return err
+	}
+	workDir := abs
+	if modRoot, err := fsutil.FindModuleRoot(abs); err == nil {
+		workDir = modRoot
+	}
+	gitRoot := workDir
+	if gr, err := fsutil.FindGitRoot(workDir); err == nil {
+		gitRoot = gr
+	}
+	outDir := flagOutDir
+	if !filepath.IsAbs(outDir) {
+		outDir = filepath.Join(workDir, outDir)
+	}
+
+	if flagUploadList {
+		entries, err := os.ReadDir(outDir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("output directory %s does not exist; run a build first", outDir)
+			}
+			return fmt.Errorf("list builds: %w", err)
+		}
+		var names []string
+		for _, e := range entries {
+			if e.IsDir() {
+				names = append(names, e.Name())
+			}
+		}
+		if len(names) == 0 {
+			fmt.Printf("No version directories in %s\n", outDir)
+			return nil
+		}
+		fmt.Printf("Available builds in %s:\n", outDir)
+		for _, n := range names {
+			fmt.Println("  ", n)
+		}
+		fmt.Println("\nUpload with: pbuild upload <VERSION> [flags]")
+		return nil
+	}
+
+	var versionDir string
+	var versionTag string
+	switch {
+	case flagUploadVersionDir != "":
+		versionDir, err = filepath.Abs(flagUploadVersionDir)
+		if err != nil {
+			return fmt.Errorf("version-dir: %w", err)
+		}
+		versionTag = filepath.Base(versionDir)
+	case flagUploadVersion != "" || len(args) == 1:
+		versionTag = flagUploadVersion
+		if versionTag == "" {
+			versionTag = args[0]
+		}
+		versionDir = filepath.Join(outDir, versionTag)
+	default:
+		return fmt.Errorf("specify which build to upload: use VERSION (e.g. 1.3.27-ab5bb44), --version, or --version-dir; use --list to see available builds")
+	}
+
+	info, err := os.Stat(versionDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("build directory %s does not exist; use --list to see available builds", versionDir)
+		}
+		return fmt.Errorf("version dir: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", versionDir)
+	}
+
+	return runUpload(gitRoot, versionDir, versionTag)
 }

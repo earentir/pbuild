@@ -18,7 +18,7 @@ A cross-compilation tool for Go projects that builds for multiple target platfor
 - **GPG signing** (`--sign`): create detached signatures (`.sig` or `.asc`) for each artifact using a pure-Go OpenPGP implementation; each signature is verified after creation
 - **SLSA provenance** (`--provenance`): write a single `provenance.intoto.jsonl` (one in-toto Statement per artifact) for OpenSSF/supply-chain verification; can be signed with `--sign`
 - **Profile** (`--profile`): use a saved target list from `builds/pbuild-profile.json`; on first run the file is created with all targets enabled—edit it to set `"enabled": false` for targets you don't want; subsequent builds use only enabled targets
-- **GitHub release upload** (`--upload-release`): upload all artifacts in the version directory to an existing GitHub release (by tag); use `--release-create` to create the release if it does not exist; requires `GITHUB_TOKEN`
+- **GitHub release upload**: upload build artifacts to a GitHub release. Use `--upload-release` on the build command (build and upload in one run), or the **`upload` subcommand** to upload an existing build later and choose which build to push (by version, path, or `--list`)
 
 ## Installation
 
@@ -65,15 +65,25 @@ Use a profile to build only the targets you want (first run creates `builds/pbui
 pbuild --profile
 ```
 
-Upload build artifacts to an existing GitHub release (repo from git remote; tag defaults to version tag):
+Upload build artifacts to an existing GitHub release (repo from git remote; tag defaults to v + version, e.g. v1.3.27-ab5bb44):
 ```bash
 GITHUB_TOKEN=ghp_xxx pbuild --all --upload-release
 ```
 
 Create the release if it does not exist, then upload:
 ```bash
-GITHUB_TOKEN=ghp_xxx pbuild --all --upload-release --release-create --release-tag v1.0.0
+GITHUB_TOKEN=ghp_xxx pbuild --all --upload-release --release-create
 ```
+
+**Build now, upload later:** Build and upload are separate. Build once, then push to GitHub when ready using the `upload` subcommand and choose which build to upload:
+
+```bash
+pbuild --all                                    # build only
+pbuild upload --list                            # list available builds
+GITHUB_TOKEN=ghp_xxx pbuild upload 1.3.27-ab5bb44 --release-create   # upload that build
+```
+
+You can specify the build with a positional version (`pbuild upload 1.3.27-ab5bb44`), `--version`, or `--version-dir`; use `--list` to see available version directories.
 
 ### Example Runs
 
@@ -254,11 +264,13 @@ Flags:
       --upload-release        upload build artifacts to a GitHub release (release must exist unless --release-create)
       --release-create        create the release if it does not exist (only with --upload-release)
       --release-repo string   GitHub repo as owner/name (default: from git remote origin)
-      --release-tag string    release tag (default: version tag)
+      --release-tag string    release tag (default: v + version, e.g. v1.3.27-ab5bb44)
       --release-draft         when creating, create as draft release
       --release-notes string  release notes body when creating
       --release-notes-file string  path to file containing release notes when creating
 ```
+
+**Subcommands:** `pbuild upload [VERSION]` — upload an existing build to a GitHub release (no build step). Specify which build with VERSION, `--version`, or `--version-dir`; use `--list` to see available builds. See [Upload subcommand](#upload-subcommand-build-now-push-later).
 
 ## Profile (saved target list)
 
@@ -426,20 +438,41 @@ With `--upload-release`, pbuild uploads **all files** in the version build direc
 - **Default (update only)**: The release for the given tag must already exist. pbuild gets that release and uploads each file as an asset. If no release exists, pbuild exits with an error and suggests using `--release-create`.
 - **`--release-create`**: If the release does not exist, pbuild creates it (with optional `--release-draft` and `--release-notes` or `--release-notes-file`), then uploads assets. The tag is created at `HEAD` if it does not exist.
 - **Repo**: Inferred from `git config remote.origin.url` (supports `https://github.com/owner/repo` and `git@github.com:owner/repo.git`). Override with `--release-repo owner/repo`.
-- **Tag**: Defaults to the version tag (e.g. `1.3.27-6276843-dirty`). Override with `--release-tag` (e.g. `v1.3.27`) for a cleaner release tag.
-- **Auth**: Set the `GITHUB_TOKEN` environment variable (e.g. a fine-grained or classic PAT with `repo` scope). Required when `--upload-release` is set.
+- **Tag**: Defaults to the actual version with a `v` prefix (e.g. `v1.3.27-ab5bb44`). Use `--release-tag` only if you want a different tag (e.g. `v1.3.27`).
+- **Auth**: Set the `GITHUB_TOKEN` environment variable (e.g. a fine-grained or classic PAT with `repo` scope). Required when uploading.
 
-Example: build, sign, add provenance, then upload to an existing release tagged `v1.0.0`:
+### Build and upload in one run
 
-```bash
-GITHUB_TOKEN=ghp_xxx pbuild --all --sign --signing-key-file ./release-key.asc --provenance --upload-release --release-tag v1.0.0
-```
-
-For the first release, create it then upload:
+Example: build, sign, add provenance, then upload (release tag defaults to e.g. `v1.3.27-ab5bb44`):
 
 ```bash
-GITHUB_TOKEN=ghp_xxx pbuild --all --upload-release --release-create --release-tag v1.0.0 --release-notes "First release."
+GITHUB_TOKEN=ghp_xxx pbuild --all --sign --signing-key-file ./release-key.asc --provenance --upload-release
 ```
+
+To create the release if it does not exist:
+
+```bash
+GITHUB_TOKEN=ghp_xxx pbuild --all --upload-release --release-create --release-notes "First release."
+```
+
+### Upload subcommand: build now, push later
+
+Use the **`upload`** subcommand to upload an **existing** build without rebuilding. You choose which build to push:
+
+- **Positional version:** `pbuild upload 1.3.27-ab5bb44` — uploads from `builds/1.3.27-ab5bb44`
+- **`--version` / `-v`:** Same as positional, e.g. `pbuild upload --version 1.3.27-ab5bb44`
+- **`--version-dir`:** Path to the build directory (absolute or relative)
+- **`--list`:** List available version directories under the output dir and exit (no upload)
+
+One of these is required (or use `--list` to see options). Release flags (`--release-create`, `--release-repo`, `--release-tag`, etc.) work the same as on the build command.
+
+```bash
+pbuild --all                                    # build only
+pbuild upload --list                            # list available builds
+GITHUB_TOKEN=ghp_xxx pbuild upload 1.3.27-ab5bb44 --release-create   # upload that build
+```
+
+Use `--release-tag` only when you want a different tag (e.g. `--release-tag v1.3.27`).
 
 ## .gitignore Management
 
