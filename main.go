@@ -37,7 +37,7 @@ import (
 	"golang.org/x/term"
 )
 
-var appVersion = "1.3.27"
+var appVersion = "1.3.29"
 
 // getBuildMode returns the appropriate build mode for the target platform
 func getBuildMode(requestedMode string) string {
@@ -325,34 +325,34 @@ func writeBuildMetadata(versionDir string, metadata BuildMetadata) error {
 }
 
 var (
-	flagAll            bool
-	flagName           string
-	flagOutDir         string
-	flagSetVersion     string
-	flagStrategy       string
-	flagAMD64Level     string
-	flagARM64Level     string
-	flagARMLevel       string
-	flagMIPSLevel      string
-	flagPPC64Level     string
-	flagRISCVLevel     string
-	flagBuildMode      string
-	flagTags           string
-	flagLDFlags        string
-	flagBuildFlags     string
-	flagVerbose        bool
-	flagSkipCleanup    bool
-	flagStopOnError    bool
-	flagParallel       int
-	flagCleanCache     bool
-	flagCompress       string
-	flagChecksums      bool
-	flagReproducible   bool
-	flagVendor         bool
-	flagSign           bool
-	flagSigningKeyFile string
-	flagSigningKey     string
-	flagSignArmor      bool
+	flagAll              bool
+	flagName             string
+	flagOutDir           string
+	flagSetVersion       string
+	flagStrategy         string
+	flagAMD64Level       string
+	flagARM64Level       string
+	flagARMLevel         string
+	flagMIPSLevel        string
+	flagPPC64Level       string
+	flagRISCVLevel       string
+	flagBuildMode        string
+	flagTags             string
+	flagLDFlags          string
+	flagBuildFlags       string
+	flagVerbose          bool
+	flagSkipCleanup      bool
+	flagStopOnError      bool
+	flagParallel         int
+	flagCleanCache       bool
+	flagCompress         string
+	flagChecksums        bool
+	flagReproducible     bool
+	flagVendor           bool
+	flagSign             bool
+	flagSigningKeyFile   string
+	flagSigningKey       string
+	flagSignArmor        bool
 	flagProfile          bool
 	flagProvenance       bool
 	flagUploadRelease    bool
@@ -364,9 +364,9 @@ var (
 	flagReleaseNotesFile string
 
 	// Upload subcommand only
-	flagUploadVersion   string
+	flagUploadVersion    string
 	flagUploadVersionDir string
-	flagUploadList     bool
+	flagUploadList       bool
 )
 
 func main() {
