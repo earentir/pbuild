@@ -9,14 +9,28 @@ import (
 	"strings"
 )
 
-var re = regexp.MustCompile(`var\s+appVersion\s*=\s*"([^"]+)"`)
+var (
+	// Strict: var appVersion = "..."
+	reVarAppVersion = regexp.MustCompile(`var\s+appVersion\s*=\s*"([^"]+)"`)
+	// Optional: const/var appVersion (identifier only), case-insensitive — not generic "Version".
+	reConstVarAppVersion = regexp.MustCompile(`(?i)(?:var|const)\s+appVersion\s*=\s*"([^"]+)"`)
+)
 
-func ExtractAppVersion(root string) (string, error) {
-	// Fallback patterns: case-insensitive, handle var/const, optional type, and var blocks.
-	reList := []*regexp.Regexp{
-		regexp.MustCompile(`(?is)\b(appversion|version)\b[^\n=]*=\s*"([^"]+)"`),
+func extractAppVersionFromSource(b []byte) (string, bool) {
+	if m := reVarAppVersion.FindSubmatch(b); len(m) == 2 {
+		return string(m[1]), true
 	}
+	if m := reConstVarAppVersion.FindSubmatch(b); len(m) == 2 {
+		return string(m[1]), true
+	}
+	return "", false
+}
 
+// ExtractAppVersion finds var appVersion = "..." (or const/var appVersion, case-insensitive)
+// in .go files under root. The previous implementation also used a loose regex that matched
+// any assignment to an identifier ending in "version", e.g. const Version = "1", which could
+// win before main.go was read and produced base versions like "1" instead of "1.4.175".
+func ExtractAppVersion(root string) (string, error) {
 	var found string
 	walk := func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -36,19 +50,9 @@ func ExtractAppVersion(root string) (string, error) {
 		if err != nil {
 			return nil
 		}
-
-		// Try original case-sensitive regex to keep package var `re` in use.
-		if m := re.FindSubmatch(b); len(m) == 2 {
-			found = string(m[1])
+		if v, ok := extractAppVersionFromSource(b); ok {
+			found = v
 			return errors.New("done")
-		}
-
-		// Try broader, case-insensitive patterns.
-		for _, rx := range reList {
-			if m := rx.FindSubmatch(b); len(m) == 3 {
-				found = string(m[2])
-				return errors.New("done")
-			}
 		}
 		return nil
 	}
