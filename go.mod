@@ -1,6 +1,6 @@
 module pbuild
 
-go 1.26.0
+go 1.26.4
 
 require (
 	github.com/keybase/go-crypto v0.0.0-20200123153347-de78d2cb44f4

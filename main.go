@@ -708,10 +708,11 @@ func run(targetDir string, isRetry bool) error {
 	// version
 	versionTag := flagSetVersion
 	if versionTag == "" {
-		base, _ := appver.ExtractAppVersion(workDir)
-		if base == "" {
-			base = appVersion
+		ver, err := appver.ExtractAppVersion(workDir)
+		if err != nil {
+			return err
 		}
+		base := ver.Version
 		rev, _ := gitmeta.ResolveHEAD(gitRoot)
 		if rev == "" {
 			rev = "unknown"
