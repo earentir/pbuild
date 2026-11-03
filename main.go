@@ -24,6 +24,7 @@ import (
 	"pbuild/fsutil"
 	"pbuild/gitmeta"
 	"pbuild/gobuild"
+	"pbuild/pkgdisc"
 	"pbuild/provenance"
 	"pbuild/release"
 	"pbuild/sign"
@@ -37,7 +38,7 @@ import (
 	"golang.org/x/term"
 )
 
-var appVersion = "1.3.31"
+var appVersion = "1.3.37"
 
 // getBuildMode returns the appropriate build mode for the target platform
 func getBuildMode(requestedMode string) string {
@@ -259,60 +260,7 @@ type BuildMetadata struct {
 	FailCount     int                    `json:"fail_count"`
 }
 
-// ProfileConfig holds the build profile (e.g. which targets are enabled). Stored in builds/ as pbuild-profile.json.
-type ProfileConfig struct {
-	Version int             `json:"version"`
-	Targets []ProfileTarget `json:"targets"`
-}
-
-// ProfileTarget represents one OS/arch target in the profile and whether it is enabled.
-type ProfileTarget struct {
-	OS      string `json:"os"`
-	Arch    string `json:"arch"`
-	Enabled bool   `json:"enabled"`
-}
-
-const (
-	profileFilename = "pbuild-profile.json"
-	profileDirName  = "builds" // profile always lives in the builds folder (not in version dir, not in custom output-dir)
-)
-
-// getProfileTargets loads the profile from the builds folder (workDir/builds/). If the file does not exist, it is created
-// with all default targets enabled and justCreated is true. Returns the list of enabled targets and any error.
-func getProfileTargets(workDir string) (matrix []targets.Target, justCreated bool, err error) {
-	profileDir := filepath.Join(workDir, profileDirName)
-	path := filepath.Join(profileDir, profileFilename)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return nil, false, fmt.Errorf("read profile: %w", err)
-		}
-		// First time: create profile with all targets enabled
-		def := targets.Default()
-		cfg := ProfileConfig{Version: 1, Targets: make([]ProfileTarget, len(def))}
-		for i, t := range def {
-			cfg.Targets[i] = ProfileTarget{OS: t.OS, Arch: t.Arch, Enabled: true}
-		}
-		body, _ := json.MarshalIndent(cfg, "", "  ")
-		if err := os.MkdirAll(profileDir, 0o755); err != nil {
-			return nil, false, fmt.Errorf("create builds dir for profile: %w", err)
-		}
-		if err := os.WriteFile(path, body, 0o644); err != nil {
-			return nil, false, fmt.Errorf("write profile: %w", err)
-		}
-		return def, true, nil
-	}
-	var cfg ProfileConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, false, fmt.Errorf("parse profile: %w", err)
-	}
-	for _, t := range cfg.Targets {
-		if t.Enabled {
-			matrix = append(matrix, targets.Target{OS: t.OS, Arch: t.Arch})
-		}
-	}
-	return matrix, false, nil
-}
+// Profile types and load/apply logic are in profile.go.
 
 // writeBuildMetadata writes build metadata to a JSON file
 func writeBuildMetadata(versionDir string, metadata BuildMetadata) error {
@@ -375,12 +323,12 @@ func main() {
 		Short:        "Cross-compile a Go project for a target matrix",
 		Args:         cobra.MaximumNArgs(1),
 		SilenceUsage: true, // do not print usage on build errors
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			target := "."
 			if len(args) == 1 {
 				target = args[0]
 			}
-			return run(target, false)
+			return run(cmd, target, false)
 		},
 	}
 	// Expose tool version via built-in --version
@@ -426,7 +374,7 @@ func main() {
 	root.Flags().BoolVar(&flagSignArmor, "sign-armor", false, "output ASCII-armored signatures (.asc) instead of binary (.sig)")
 
 	// Profile: use saved target list from builds folder (create on first run, then build only enabled)
-	root.Flags().BoolVar(&flagProfile, "profile", false, "use profile: build targets from "+profileDirName+"/"+profileFilename+" (create with all enabled on first run; edit to disable targets)")
+	root.Flags().BoolVar(&flagProfile, "profile", false, "use "+profileDirName+"/"+profileFilename+" for targets and build settings (CLI flags override profile)")
 
 	// SLSA provenance (in-toto attestations)
 	root.Flags().BoolVar(&flagProvenance, "provenance", false, "write SLSA provenance (provenance.intoto.jsonl) for OpenSSF/supply-chain verification")
@@ -664,7 +612,7 @@ func renderTablesSideBySide(_, _, _ *tablewriter.Table) {
 	}
 }
 
-func run(targetDir string, isRetry bool) error {
+func run(cmd *cobra.Command, targetDir string, isRetry bool) error {
 	startTime := time.Now()
 
 	abs, err := filepath.Abs(targetDir)
@@ -680,6 +628,28 @@ func run(targetDir string, isRetry bool) error {
 	gitRoot := workDir
 	if gr, err := fsutil.FindGitRoot(workDir); err == nil {
 		gitRoot = gr
+	}
+
+	// Profile: load targets and build settings before vendor/sign checks.
+	var matrix []targets.Target
+	if flagProfile {
+		profileCfg, m, justCreated, err := loadProfile(workDir)
+		if err != nil {
+			return err
+		}
+		profilePath := filepath.Join(workDir, profileDirName, profileFilename)
+		if justCreated {
+			fmt.Printf("Profile created: %s\n", profilePath)
+			fmt.Println("Edit the file (targets and build settings), then run with --profile again.")
+			return nil
+		}
+		matrix = m
+		if len(matrix) == 0 {
+			return fmt.Errorf("profile has no enabled targets; edit %s and set \"enabled\": true for at least one target", profilePath)
+		}
+		if profileCfg.Version >= 2 {
+			applyProfileBuildSettings(cmd, profileCfg.Build)
+		}
 	}
 
 	// When using vendor, ensure vendor/ exists before building (create if never run before)
@@ -705,23 +675,21 @@ func run(targetDir string, isRetry bool) error {
 		}
 	}
 
-	// version
-	versionTag := flagSetVersion
-	if versionTag == "" {
-		ver, err := appver.ExtractAppVersion(workDir)
-		if err != nil {
-			return err
-		}
-		base := ver.Version
-		rev, _ := gitmeta.ResolveHEAD(gitRoot)
-		if rev == "" {
-			rev = "unknown"
-		}
+	// Resolve main packages and per-binary versions
+	plans, err := appver.ResolvePlans(workDir, projectName, flagSetVersion)
+	if err != nil {
+		return err
+	}
+
+	rev, _ := gitmeta.ResolveHEAD(gitRoot)
+	if rev == "" {
+		rev = "unknown"
+	}
+	if flagSetVersion == "" {
 		dirty, _ := gitmeta.HeuristicDirty(gitRoot)
 		if dirty {
 			rev += "-dirty"
 		}
-		versionTag = fmt.Sprintf("%s-%s", base, rev)
 	}
 
 	// Check and update .gitignore to ensure builds/ directory is ignored
@@ -735,45 +703,64 @@ func run(targetDir string, isRetry bool) error {
 		outDir = filepath.Join(workDir, outDir)
 	}
 
-	// matrix: from profile (builds/pbuild-profile.json), or --all, or current platform only. Do this before creating versionDir.
-	var matrix []targets.Target
-	if flagProfile {
-		var justCreated bool
-		matrix, justCreated, err = getProfileTargets(workDir)
-		if err != nil {
-			return err
+	// matrix: from profile (already loaded), --all, or current platform only.
+	if !flagProfile {
+		if flagAll {
+			matrix = targets.Default()
+		} else {
+			matrix = []targets.Target{{OS: runtime.GOOS, Arch: runtime.GOARCH}}
 		}
-		profilePath := filepath.Join(workDir, profileDirName, profileFilename)
-		if justCreated {
-			fmt.Printf("Profile created: %s\n", profilePath)
-			fmt.Println("Edit the file and set \"enabled\": false for targets you don't want, then run with --profile again.")
-			return nil
-		}
-		if len(matrix) == 0 {
-			return fmt.Errorf("profile has no enabled targets; edit %s and set \"enabled\": true for at least one target", profilePath)
-		}
-	} else if flagAll {
-		matrix = targets.Default()
-	} else {
-		matrix = []targets.Target{{OS: runtime.GOOS, Arch: runtime.GOARCH}}
 	}
 
-	versionDir := filepath.Join(outDir, versionTag)
-	if !flagSkipCleanup {
-		_ = os.RemoveAll(versionDir)
-	}
-	if err := os.MkdirAll(versionDir, 0o755); err != nil {
-		return err
+	type packageBuild struct {
+		main       pkgdisc.Main
+		versionTag string
+		versionDir string
+		binaryName string
 	}
 
-	fmt.Printf("Building version %s\n\n", versionTag)
+	var pkgBuilds []packageBuild
+	createdDirs := make(map[string]bool)
+	for _, plan := range plans {
+		var versionTag string
+		if flagSetVersion != "" {
+			versionTag = flagSetVersion
+		} else {
+			versionTag = fmt.Sprintf("%s-%s", plan.Base, rev)
+		}
+		binaryName := plan.Main.Name
+		if flagName != "" && len(plans) == 1 {
+			binaryName = flagName
+		}
+		versionDir := filepath.Join(outDir, versionTag)
+		if !createdDirs[versionDir] {
+			if !flagSkipCleanup {
+				_ = os.RemoveAll(versionDir)
+			}
+			if err := os.MkdirAll(versionDir, 0o755); err != nil {
+				return err
+			}
+			createdDirs[versionDir] = true
+		}
+		pkgBuilds = append(pkgBuilds, packageBuild{
+			main:       plan.Main,
+			versionTag: versionTag,
+			versionDir: versionDir,
+			binaryName: binaryName,
+		})
+		fmt.Printf("Building %s version %s\n", binaryName, versionTag)
+	}
+	fmt.Println()
 
 	// Show build configuration in 3 side-by-side tables
 	showConfigTables()
 	fmt.Println()
 
 	// collect rows for summary table (errMsg used to detect vendor-related failures)
-	type row struct{ file, target, size, sha256, sha512, status, errMsg string }
+	type row struct {
+		file, target, size, sha256, sha512, status, errMsg string
+		versionDir, versionTag, binaryName                  string
+	}
 	var rows []row
 
 	// status glyphs
@@ -790,9 +777,20 @@ func run(targetDir string, isRetry bool) error {
 		numWorkers = 1 // Sequential
 	}
 
-	// Channel for targets
-	targetChan := make(chan targets.Target, len(matrix))
-	resultChan := make(chan row, len(matrix))
+	// Channel for build jobs (main package × target)
+	type buildJob struct {
+		pkg    packageBuild
+		target targets.Target
+	}
+	jobs := make([]buildJob, 0, len(pkgBuilds)*len(matrix))
+	for _, pb := range pkgBuilds {
+		for _, t := range matrix {
+			jobs = append(jobs, buildJob{pkg: pb, target: t})
+		}
+	}
+
+	jobChan := make(chan buildJob, len(jobs))
+	resultChan := make(chan row, len(jobs))
 
 	// Start workers
 	var wg sync.WaitGroup
@@ -800,9 +798,11 @@ func run(targetDir string, isRetry bool) error {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			for t := range targetChan {
-				outName := targets.OutputName(projectName, t)
-				outPath := filepath.Join(versionDir, outName)
+			for job := range jobChan {
+				t := job.target
+				pb := job.pkg
+				outName := targets.OutputName(pb.binaryName, t)
+				outPath := filepath.Join(pb.versionDir, outName)
 
 				if flagVerbose {
 					fmt.Printf("[Worker %d] Building for: %s/%s -> %s\n", workerID, t.OS, t.Arch, outPath)
@@ -837,10 +837,10 @@ func run(targetDir string, isRetry bool) error {
 					CleanCache:   flagCleanCache,
 					Reproducible: flagReproducible,
 					UseVendor:    flagVendor,
+					Package:      pb.main.BuildPath,
 				}
 
-				// Always inject version+hash so built binary --version shows it (last -X wins).
-				versionInject := "-X main.appVersion=" + versionTag + " -X main.Version=" + versionTag
+				versionInject := appver.LDFlagsVersionInject(pb.versionTag)
 				if config.LDFlags == "" {
 					config.LDFlags = "-s -w " + versionInject
 				} else {
@@ -855,13 +855,16 @@ func run(targetDir string, isRetry bool) error {
 						fmt.Printf("  FAILED\n  %v\n\n", err)
 					}
 					resultChan <- row{
-						file:   outName,
-						target: t.OS + "/" + t.Arch,
-						size:   "n/a",
-						sha256: "n/a",
-						sha512: "",
-						status: redX,
-						errMsg: errStr,
+						file:       outName,
+						target:     t.OS + "/" + t.Arch,
+						size:       "n/a",
+						sha256:     "n/a",
+						sha512:     "",
+						status:     redX,
+						errMsg:     errStr,
+						versionDir: pb.versionDir,
+						versionTag: pb.versionTag,
+						binaryName: pb.binaryName,
 					}
 					continue
 				}
@@ -932,22 +935,25 @@ func run(targetDir string, isRetry bool) error {
 				}
 
 				resultChan <- row{
-					file:   finalOutName,
-					target: t.OS + "/" + t.Arch,
-					size:   sizeStr,
-					sha256: sha256Str,
-					sha512: sha512Str,
-					status: greenTick,
+					file:       finalOutName,
+					target:     t.OS + "/" + t.Arch,
+					size:       sizeStr,
+					sha256:     sha256Str,
+					sha512:     sha512Str,
+					status:     greenTick,
+					versionDir: pb.versionDir,
+					versionTag: pb.versionTag,
+					binaryName: pb.binaryName,
 				}
 			}
 		}(i)
 	}
 
-	// Send targets to workers
+	// Send jobs to workers
 	go func() {
-		defer close(targetChan)
-		for _, t := range matrix {
-			targetChan <- t
+		defer close(jobChan)
+		for _, job := range jobs {
+			jobChan <- job
 		}
 	}()
 
@@ -982,22 +988,31 @@ func run(targetDir string, isRetry bool) error {
 			if scanner.Scan() {
 				line := strings.TrimSpace(strings.ToLower(scanner.Text()))
 				if line == "y" || line == "yes" {
-					cmd := exec.CommandContext(ctx, "go", "mod", "vendor")
-					cmd.Dir = workDir
-					cmd.Stdout = os.Stdout
-					cmd.Stderr = os.Stderr
-					if err := cmd.Run(); err != nil {
+					vendorCmd := exec.CommandContext(ctx, "go", "mod", "vendor")
+					vendorCmd.Dir = workDir
+					vendorCmd.Stdout = os.Stdout
+					vendorCmd.Stderr = os.Stderr
+					if err := vendorCmd.Run(); err != nil {
 						fmt.Fprintf(os.Stderr, "go mod vendor failed: %v\n", err)
 					} else {
 						fmt.Println("Re-running build after re-vendor...")
-						return run(targetDir, true)
+						return run(cmd, targetDir, true)
 					}
 				}
 			}
 		}
 	}
 
-	fmt.Printf("\nArtifacts for %s, version %s\nstored in %s\n\n", projectName, versionTag, versionDir)
+	fmt.Printf("\nArtifacts for %s\n", projectName)
+	seenArtifactDirs := make(map[string]bool)
+	for _, pb := range pkgBuilds {
+		if seenArtifactDirs[pb.versionDir] {
+			continue
+		}
+		seenArtifactDirs[pb.versionDir] = true
+		fmt.Printf("  version %s → %s\n", pb.versionTag, pb.versionDir)
+	}
+	fmt.Println()
 
 	// render table — inner grid only, no outer frame
 	tbl := tablewriter.NewTable(
@@ -1029,181 +1044,203 @@ func run(targetDir string, isRetry bool) error {
 		username = os.Getenv("USERNAME") // Windows
 	}
 
-	// Collect artifact names for signing and artifact entries (with hashes) for metadata
-	var artifactNames []string
-	var artifactEntries []ArtifactEntry
-	for _, r := range rows {
-		if r.status == greenTick {
-			artifactNames = append(artifactNames, r.file)
-			ent := ArtifactEntry{Name: r.file}
-			if r.sha256 != "n/a" && r.sha256 != "" {
-				ent.SHA256 = r.sha256
-			}
-			if r.sha512 != "" {
-				ent.SHA512 = r.sha512
-			}
-			artifactEntries = append(artifactEntries, ent)
+	// Collect per-version-dir outputs for metadata, signing, provenance, upload
+	type versionOutput struct {
+		dir string
+		tag string
+	}
+	var versionOutputs []versionOutput
+	seenOutDirs := make(map[string]bool)
+	for _, pb := range pkgBuilds {
+		if seenOutDirs[pb.versionDir] {
+			continue
 		}
+		seenOutDirs[pb.versionDir] = true
+		versionOutputs = append(versionOutputs, versionOutput{dir: pb.versionDir, tag: pb.versionTag})
 	}
 
-	// SLSA provenance: single provenance.intoto.jsonl with one Statement per artifact
-	var provenancePath string
-	if flagProvenance && len(artifactEntries) > 0 {
-		h := sha256.Sum256([]byte(versionTag + "|" + projectName + "|" + startTime.UTC().Format(time.RFC3339Nano)))
-		invocationID := hex.EncodeToString(h[:])[:32]
-		targetList := make([]provenance.Target, len(matrix))
-		for i, t := range matrix {
-			targetList[i] = provenance.Target{OS: t.OS, Arch: t.Arch}
+	for _, vo := range versionOutputs {
+		var artifactNames []string
+		var artifactEntries []ArtifactEntry
+		var dirSuccess, dirFail int
+		for _, r := range rows {
+			if r.versionDir != vo.dir {
+				continue
+			}
+			if r.status == greenTick {
+				dirSuccess++
+				artifactNames = append(artifactNames, r.file)
+				ent := ArtifactEntry{Name: r.file}
+				if r.sha256 != "n/a" && r.sha256 != "" {
+					ent.SHA256 = r.sha256
+				}
+				if r.sha512 != "" {
+					ent.SHA512 = r.sha512
+				}
+				artifactEntries = append(artifactEntries, ent)
+			} else if r.status == redX {
+				dirFail++
+			}
 		}
-		artifacts := make([]provenance.Artifact, len(artifactEntries))
-		for i, e := range artifactEntries {
-			artifacts[i] = provenance.Artifact{Name: e.Name, SHA256: e.SHA256, SHA512: e.SHA512}
+
+		// SLSA provenance: single provenance.intoto.jsonl with one Statement per artifact
+		var provenancePath string
+		if flagProvenance && len(artifactEntries) > 0 {
+			h := sha256.Sum256([]byte(vo.tag + "|" + projectName + "|" + startTime.UTC().Format(time.RFC3339Nano)))
+			invocationID := hex.EncodeToString(h[:])[:32]
+			targetList := make([]provenance.Target, len(matrix))
+			for i, t := range matrix {
+				targetList[i] = provenance.Target{OS: t.OS, Arch: t.Arch}
+			}
+			artifacts := make([]provenance.Artifact, len(artifactEntries))
+			for i, e := range artifactEntries {
+				artifacts[i] = provenance.Artifact{Name: e.Name, SHA256: e.SHA256, SHA512: e.SHA512}
+			}
+			externalParams := map[string]interface{}{
+				"version": vo.tag, "project": projectName, "strategy": flagStrategy,
+				"output_dir": flagOutDir, "compress": flagCompress, "checksums": flagChecksums,
+				"reproducible": flagReproducible, "vendor": flagVendor, "profile": flagProfile,
+			}
+			internalParams := map[string]interface{}{
+				"host": hostname, "user": username, "go_version": runtime.Version(),
+				"pbuild_version": appVersion, "build_os": runtime.GOOS, "build_arch": runtime.GOARCH,
+				"parallel": flagParallel,
+			}
+			path, err := provenance.Write(&provenance.Inputs{
+				VersionDir:     vo.dir,
+				InvocationID:   invocationID,
+				StartedOn:      startTime,
+				FinishedOn:     buildTime,
+				ProjectName:    projectName,
+				VersionTag:     vo.tag,
+				Hostname:       hostname,
+				Username:       username,
+				GoVersion:      runtime.Version(),
+				PbuildVersion:  appVersion,
+				ExternalParams: externalParams,
+				InternalParams: internalParams,
+				Targets:        targetList,
+				Artifacts:      artifacts,
+			})
+			if err != nil {
+				fmt.Printf("Warning: Failed to write provenance: %v\n", err)
+			} else {
+				provenancePath = path
+				fmt.Printf("Provenance written to: %s\n\n", path)
+			}
 		}
-		externalParams := map[string]interface{}{
-			"version": versionTag, "project": projectName, "strategy": flagStrategy,
-			"output_dir": flagOutDir, "compress": flagCompress, "checksums": flagChecksums,
-			"reproducible": flagReproducible, "vendor": flagVendor, "profile": flagProfile,
+
+		// GPG sign artifacts (and verify each signature)
+		if flagSign && len(artifactNames) > 0 {
+			passphrase, err := getSigningPassphrase()
+			if err != nil {
+				return err
+			}
+			keyPath := flagSigningKeyFile
+			if !filepath.IsAbs(keyPath) {
+				keyPath = filepath.Join(workDir, keyPath)
+			}
+			entity, err := sign.LoadSigningEntity(keyPath, flagSigningKey, passphrase)
+			if err != nil {
+				return fmt.Errorf("load signing key: %w", err)
+			}
+			publicKeyPath := filepath.Join(vo.dir, sign.PublicKeyFilename)
+			if err := sign.ExportPublicKey(entity, publicKeyPath); err != nil {
+				return fmt.Errorf("export public key: %w", err)
+			}
+			sigExt := ".sig"
+			if flagSignArmor {
+				sigExt = ".asc"
+			}
+			if err := sign.SignArtifacts(entity, vo.dir, artifactNames, sigExt); err != nil {
+				return fmt.Errorf("sign artifacts: %w", err)
+			}
+			if provenancePath != "" {
+				sigPath := sign.SignaturePath(provenancePath, sigExt)
+				if err := sign.SignAndVerify(entity, provenancePath, sigPath, sigExt); err != nil {
+					return fmt.Errorf("sign provenance: %w", err)
+				}
+				fmt.Printf("Signed provenance: %s\n", sigPath)
+			}
+			fmt.Printf("Signed %d artifact(s) in %s with GPG (signatures verified). Wrote %s.\n\n", len(artifactNames), vo.dir, sign.PublicKeyFilename)
 		}
-		internalParams := map[string]interface{}{
-			"host": hostname, "user": username, "go_version": runtime.Version(),
-			"pbuild_version": appVersion, "build_os": runtime.GOOS, "build_arch": runtime.GOARCH,
-			"parallel": flagParallel,
+
+		metadata := BuildMetadata{
+			ProjectName:   projectName,
+			Version:       vo.tag,
+			BuildTime:     buildTime,
+			BuildDuration: time.Since(startTime).String(),
+			GoVersion:     runtime.Version(),
+			BuildHost:     hostname,
+			BuildUser:     username,
+			BuildOS:       runtime.GOOS,
+			BuildArch:     runtime.GOARCH,
+			Targets:       matrix,
+			BuildConfig: gobuild.BuildConfig{
+				Strategy:     gobuild.ParseStrategy(flagStrategy),
+				AMD64Level:   flagAMD64Level,
+				ARM64Level:   flagARM64Level,
+				ARMLevel:     flagARMLevel,
+				MIPSLevel:    flagMIPSLevel,
+				PPC64Level:   flagPPC64Level,
+				RISCVLevel:   flagRISCVLevel,
+				BuildMode:    flagBuildMode,
+				Tags:         flagTags,
+				LDFlags:      flagLDFlags,
+				BuildFlags:   flagBuildFlags,
+				Verbose:      flagVerbose,
+				CleanCache:   flagCleanCache,
+				Reproducible: flagReproducible,
+				UseVendor:    flagVendor,
+			},
+			Flags: map[string]interface{}{
+				"all":              flagAll,
+				"name":             flagName,
+				"output_dir":       flagOutDir,
+				"set_version":      flagSetVersion,
+				"tool_version":     appVersion,
+				"strategy":         flagStrategy,
+				"amd64_level":      flagAMD64Level,
+				"arm64_level":      flagARM64Level,
+				"arm_level":        flagARMLevel,
+				"mips_level":       flagMIPSLevel,
+				"ppc64_level":      flagPPC64Level,
+				"riscv_level":      flagRISCVLevel,
+				"buildmode":        flagBuildMode,
+				"tags":             flagTags,
+				"ldflags":          flagLDFlags,
+				"build_flags":      flagBuildFlags,
+				"verbose":          flagVerbose,
+				"skip_cleanup":     flagSkipCleanup,
+				"stop_on_error":    flagStopOnError,
+				"parallel":         flagParallel,
+				"clean_cache":      flagCleanCache,
+				"compress":         flagCompress,
+				"checksums":        flagChecksums,
+				"reproducible":     flagReproducible,
+				"vendor":           flagVendor,
+				"sign":             flagSign,
+				"signing_key_file": flagSigningKeyFile,
+				"signing_key":      flagSigningKey,
+				"sign_armor":       flagSignArmor,
+				"provenance":       flagProvenance,
+				"profile":          flagProfile,
+			},
+			Artifacts:    artifactEntries,
+			SuccessCount: dirSuccess,
+			FailCount:    dirFail,
 		}
-		path, err := provenance.Write(&provenance.Inputs{
-			VersionDir:     versionDir,
-			InvocationID:   invocationID,
-			StartedOn:      startTime,
-			FinishedOn:     buildTime,
-			ProjectName:    projectName,
-			VersionTag:     versionTag,
-			Hostname:       hostname,
-			Username:       username,
-			GoVersion:      runtime.Version(),
-			PbuildVersion:  appVersion,
-			ExternalParams: externalParams,
-			InternalParams: internalParams,
-			Targets:        targetList,
-			Artifacts:      artifacts,
-		})
-		if err != nil {
-			fmt.Printf("Warning: Failed to write provenance: %v\n", err)
+
+		if err := writeBuildMetadata(vo.dir, metadata); err != nil {
+			fmt.Printf("Warning: Failed to write build metadata: %v\n", err)
 		} else {
-			provenancePath = path
-			fmt.Printf("Provenance written to: %s\n\n", path)
+			fmt.Printf("Build metadata written to: %s/build-metadata.json\n\n", vo.dir)
 		}
-	}
 
-	// GPG sign artifacts (and verify each signature)
-	if flagSign && len(artifactNames) > 0 {
-		passphrase, err := getSigningPassphrase()
-		if err != nil {
-			return err
-		}
-		keyPath := flagSigningKeyFile
-		if !filepath.IsAbs(keyPath) {
-			keyPath = filepath.Join(workDir, keyPath)
-		}
-		entity, err := sign.LoadSigningEntity(keyPath, flagSigningKey, passphrase)
-		if err != nil {
-			return fmt.Errorf("load signing key: %w", err)
-		}
-		// Write public key into build dir so consumers can verify (e.g. GitHub release convention)
-		publicKeyPath := filepath.Join(versionDir, sign.PublicKeyFilename)
-		if err := sign.ExportPublicKey(entity, publicKeyPath); err != nil {
-			return fmt.Errorf("export public key: %w", err)
-		}
-		sigExt := ".sig"
-		if flagSignArmor {
-			sigExt = ".asc"
-		}
-		if err := sign.SignArtifacts(entity, versionDir, artifactNames, sigExt); err != nil {
-			return fmt.Errorf("sign artifacts: %w", err)
-		}
-		if provenancePath != "" {
-			sigPath := sign.SignaturePath(provenancePath, sigExt)
-			if err := sign.SignAndVerify(entity, provenancePath, sigPath, sigExt); err != nil {
-				return fmt.Errorf("sign provenance: %w", err)
+		if flagUploadRelease {
+			if err := runUpload(gitRoot, vo.dir, vo.tag); err != nil {
+				return err
 			}
-			fmt.Printf("Signed provenance: %s\n", sigPath)
-		}
-		fmt.Printf("Signed %d artifact(s) with GPG (signatures verified). Wrote %s.\n\n", len(artifactNames), sign.PublicKeyFilename)
-	}
-
-	metadata := BuildMetadata{
-		ProjectName:   projectName,
-		Version:       versionTag,
-		BuildTime:     buildTime,
-		BuildDuration: time.Since(startTime).String(),
-		GoVersion:     runtime.Version(),
-		BuildHost:     hostname,
-		BuildUser:     username,
-		BuildOS:       runtime.GOOS,
-		BuildArch:     runtime.GOARCH,
-		Targets:       matrix,
-		BuildConfig: gobuild.BuildConfig{
-			Strategy:     gobuild.ParseStrategy(flagStrategy),
-			AMD64Level:   flagAMD64Level,
-			ARM64Level:   flagARM64Level,
-			ARMLevel:     flagARMLevel,
-			MIPSLevel:    flagMIPSLevel,
-			PPC64Level:   flagPPC64Level,
-			RISCVLevel:   flagRISCVLevel,
-			BuildMode:    flagBuildMode, // Show the requested mode, not the resolved one
-			Tags:         flagTags,
-			LDFlags:      flagLDFlags,
-			BuildFlags:   flagBuildFlags,
-			Verbose:      flagVerbose,
-			CleanCache:   flagCleanCache,
-			Reproducible: flagReproducible,
-			UseVendor:    flagVendor,
-		},
-		Flags: map[string]interface{}{
-			"all":              flagAll,
-			"name":             flagName,
-			"output_dir":       flagOutDir,
-			"set_version":      flagSetVersion,
-			"tool_version":     appVersion,
-			"strategy":         flagStrategy,
-			"amd64_level":      flagAMD64Level,
-			"arm64_level":      flagARM64Level,
-			"arm_level":        flagARMLevel,
-			"mips_level":       flagMIPSLevel,
-			"ppc64_level":      flagPPC64Level,
-			"riscv_level":      flagRISCVLevel,
-			"buildmode":        flagBuildMode,
-			"tags":             flagTags,
-			"ldflags":          flagLDFlags,
-			"build_flags":      flagBuildFlags,
-			"verbose":          flagVerbose,
-			"skip_cleanup":     flagSkipCleanup,
-			"stop_on_error":    flagStopOnError,
-			"parallel":         flagParallel,
-			"clean_cache":      flagCleanCache,
-			"compress":         flagCompress,
-			"checksums":        flagChecksums,
-			"reproducible":     flagReproducible,
-			"vendor":           flagVendor,
-			"sign":             flagSign,
-			"signing_key_file": flagSigningKeyFile,
-			"signing_key":      flagSigningKey,
-			"sign_armor":       flagSignArmor,
-			"provenance":       flagProvenance,
-			"profile":          flagProfile,
-		},
-		Artifacts:    artifactEntries,
-		SuccessCount: successCount,
-		FailCount:    failCount,
-	}
-
-	if err := writeBuildMetadata(versionDir, metadata); err != nil {
-		fmt.Printf("Warning: Failed to write build metadata: %v\n", err)
-	} else {
-		fmt.Printf("Build metadata written to: %s/build-metadata.json\n\n", versionDir)
-	}
-
-	if flagUploadRelease {
-		if err := runUpload(gitRoot, versionDir, versionTag); err != nil {
-			return err
 		}
 	}
 

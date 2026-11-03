@@ -17,7 +17,7 @@ A cross-compilation tool for Go projects that builds for multiple target platfor
 - **Vendor support** (`--vendor`): build with `-mod=vendor`; creates `vendor/` if missing; prompts to re-vendor and retry when builds fail due to out-of-date vendored packages
 - **GPG signing** (`--sign`): create detached signatures (`.sig` or `.asc`) for each artifact using a pure-Go OpenPGP implementation; each signature is verified after creation
 - **SLSA provenance** (`--provenance`): write a single `provenance.intoto.jsonl` (one in-toto Statement per artifact) for OpenSSF/supply-chain verification; can be signed with `--sign`
-- **Profile** (`--profile`): use a saved target list from `builds/pbuild-profile.json`; on first run the file is created with all targets enabled—edit it to set `"enabled": false` for targets you don't want; subsequent builds use only enabled targets
+- **Profile** (`--profile`): use `builds/pbuild-profile.json` for enabled targets and default build flags (amd64 level, strategy, vendor, etc.); CLI flags override profile when passed
 - **GitHub release upload**: upload build artifacts to a GitHub release. Use `--upload-release` on the build command (build and upload in one run), or the **`upload` subcommand** to upload an existing build later and choose which build to push (by version, path, or `--list`)
 
 ## Installation
@@ -272,30 +272,57 @@ Flags:
 
 **Subcommands:** `pbuild upload [VERSION]` — upload an existing build to a GitHub release (no build step). Specify which build with VERSION, `--version`, or `--version-dir`; use `--list` to see available builds. See [Upload subcommand](#upload-subcommand-build-now-push-later).
 
-## Profile (saved target list)
+## Profile (saved targets and build settings)
 
-With `--profile`, pbuild uses a config file in the output directory to decide which OS/arch targets to build. This lets you avoid `--all` while still building a fixed set of targets every time.
+With `--profile`, pbuild reads `builds/pbuild-profile.json` for **which targets to build** and **default build flags** (strategy, CPU levels, `vendor`, `parallel`, etc.). Command-line flags still win when you pass them explicitly (e.g. `pbuild --profile --amd64-level v3` overrides the profile for that run).
 
-1. **First run:** `pbuild --profile` creates `builds/pbuild-profile.json` with every predefined target and `"enabled": true`, then exits (no build). Edit the file, then run again.
-2. **Edit the file:** Set `"enabled": false` for any target you don't want (e.g. drop `freebsd`, `openbsd`, or specific arches).
-3. **Next runs:** `pbuild --profile` builds only the targets that still have `"enabled": true`.
+1. **First run:** `pbuild --profile` creates `builds/pbuild-profile.json` (version 2) with all targets enabled and default build settings, then exits. Edit the file, then run again.
+2. **Edit targets:** Set `"enabled": false` for OS/arch pairs you do not want.
+3. **Edit build:** Change fields under `"build"` (same names as in `build-metadata.json` / CLI flags, e.g. `amd64_level`, `strategy`, `vendor`).
+4. **Next runs:** `pbuild --profile` uses the saved settings.
 
-Example profile (after editing):
+Example profile:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
+  "build": {
+    "strategy": "purego",
+    "amd64_level": "v1",
+    "arm64_level": "v8.0",
+    "arm_level": "7",
+    "mips_level": "hardfloat",
+    "ppc64_level": "power8",
+    "riscv_level": "rva20u64",
+    "buildmode": "auto",
+    "tags": "",
+    "ldflags": "",
+    "build_flags": "",
+    "compress": "",
+    "parallel": 8,
+    "verbose": false,
+    "skip_cleanup": false,
+    "stop_on_error": false,
+    "clean_cache": false,
+    "checksums": true,
+    "reproducible": false,
+    "vendor": false,
+    "sign": false,
+    "signing_key_file": "",
+    "signing_key": "",
+    "sign_armor": false,
+    "provenance": false
+  },
   "targets": [
     { "os": "linux", "arch": "amd64", "enabled": true },
     { "os": "linux", "arch": "arm64", "enabled": true },
-    { "os": "darwin", "arch": "amd64", "enabled": false },
     { "os": "darwin", "arch": "arm64", "enabled": true },
     { "os": "windows", "arch": "amd64", "enabled": true }
   ]
 }
 ```
 
-The profile file lives under your output dir (default `builds/`), which is typically in `.gitignore`, so it is not committed. You can commit it if you want to share the same target list with others.
+Profiles with `"version": 1` (targets only) still work; add `"version": 2` and a `"build"` block to use saved build settings. The profile file lives under your output dir (default `builds/`), which is typically in `.gitignore`.
 
 ## Generating a GPG key pair
 
