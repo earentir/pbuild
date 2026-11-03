@@ -68,6 +68,7 @@ type BuildConfig struct {
 	CleanCache  bool
 	Reproducible bool
 	UseVendor   bool
+	Package     string // main package import path relative to module root (default ".")
 }
 
 func Build(ctx context.Context, workDir string, t targets.Target, outputPath, ldflags string) error {
@@ -133,7 +134,11 @@ func BuildWithConfig(ctx context.Context, workDir string, t targets.Target, outp
 	}
 
 	// Add ldflags
-	buildArgs = append(buildArgs, "-ldflags", config.LDFlags, "-o", outputPath, ".")
+	pkg := config.Package
+	if pkg == "" {
+		pkg = "."
+	}
+	buildArgs = append(buildArgs, "-ldflags", config.LDFlags, "-o", outputPath, pkg)
 
 	cmd := exec.CommandContext(ctx, "go", buildArgs...)
 	cmd.Dir = workDir
