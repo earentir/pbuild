@@ -322,7 +322,7 @@ Example profile:
 }
 ```
 
-Profiles with `"version": 1` (targets only) still work; add `"version": 2` and a `"build"` block to use saved build settings. The profile file lives under your output dir (default `builds/`), which is typically in `.gitignore`.
+Profiles with `"version": 1` (targets only) are **migrated automatically** on the next `pbuild --profile` run: the file is rewritten as version 2 with a full `"build"` section (defaults), your existing target enable/disable choices are preserved, and any new platform entries pbuild knows about are appended as `"enabled": false`. The profile file lives under your output dir (default `builds/`), which is typically in `.gitignore`.
 
 ## Generating a GPG key pair
 
