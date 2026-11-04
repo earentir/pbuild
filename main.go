@@ -38,7 +38,7 @@ import (
 	"golang.org/x/term"
 )
 
-var appVersion = "1.3.37"
+var appVersion = "1.3.39"
 
 // getBuildMode returns the appropriate build mode for the target platform
 func getBuildMode(requestedMode string) string {
@@ -614,6 +614,7 @@ func renderTablesSideBySide(_, _, _ *tablewriter.Table) {
 
 func run(cmd *cobra.Command, targetDir string, isRetry bool) error {
 	startTime := time.Now()
+	profilePlatforms = nil
 
 	abs, err := filepath.Abs(targetDir)
 	if err != nil {
@@ -647,9 +648,7 @@ func run(cmd *cobra.Command, targetDir string, isRetry bool) error {
 		if len(matrix) == 0 {
 			return fmt.Errorf("profile has no enabled targets; edit %s and set \"enabled\": true for at least one target", profilePath)
 		}
-		if profileCfg.Version >= 2 {
-			applyProfileBuildSettings(cmd, profileCfg.Build)
-		}
+		applyProfileConfig(cmd, profileCfg)
 	}
 
 	// When using vendor, ensure vendor/ exists before building (create if never run before)
@@ -779,13 +778,35 @@ func run(cmd *cobra.Command, targetDir string, isRetry bool) error {
 
 	// Channel for build jobs (main package × target)
 	type buildJob struct {
-		pkg    packageBuild
-		target targets.Target
+		pkg              packageBuild
+		target           targets.Target
+		profileFilename  string // exact -o basename from profile; empty = legacy OutputName(binaryName)
 	}
 	jobs := make([]buildJob, 0, len(pkgBuilds)*len(matrix))
-	for _, pb := range pkgBuilds {
-		for _, t := range matrix {
-			jobs = append(jobs, buildJob{pkg: pb, target: t})
+	if flagProfile {
+		for _, plat := range profilePlatforms {
+			if !plat.Enabled {
+				continue
+			}
+			t := targets.Target{OS: plat.OS, Arch: plat.Arch}
+			for _, spec := range plat.Builds {
+				for _, pb := range pkgBuilds {
+					if normalizeProfilePackage(spec.Package) != normalizeProfilePackage(pb.main.BuildPath) {
+						continue
+					}
+					jobs = append(jobs, buildJob{
+						pkg:             pb,
+						target:          t,
+						profileFilename: spec.Filename,
+					})
+				}
+			}
+		}
+	} else {
+		for _, pb := range pkgBuilds {
+			for _, t := range matrix {
+				jobs = append(jobs, buildJob{pkg: pb, target: t})
+			}
 		}
 	}
 
@@ -801,7 +822,7 @@ func run(cmd *cobra.Command, targetDir string, isRetry bool) error {
 			for job := range jobChan {
 				t := job.target
 				pb := job.pkg
-				outName := targets.OutputName(pb.binaryName, t)
+				outName := profileArtifactName(job.profileFilename, pb.binaryName, t)
 				outPath := filepath.Join(pb.versionDir, outName)
 
 				if flagVerbose {
