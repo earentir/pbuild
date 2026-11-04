@@ -6,34 +6,51 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/spf13/cobra"
 
+	"pbuild/fsutil"
+	"pbuild/pkgdisc"
 	"pbuild/targets"
 )
 
 const (
 	profileFilename = "pbuild-profile.json"
-	profileDirName  = "builds" // profile always lives in the builds folder (not in version dir, not in custom output-dir)
+	profileDirName  = "builds"
 )
 
-const profileVersion = 2
+const profileVersion = 6
 
-// ProfileConfig is stored in builds/pbuild-profile.json when using --profile.
+// profilePlatforms is loaded from the profile when using --profile.
+var profilePlatforms []ProfilePlatform
+
+// ProfileConfig is stored in builds/pbuild-profile.json.
 type ProfileConfig struct {
-	Version int                  `json:"version"`
-	Targets []ProfileTarget        `json:"targets"`
-	Build   ProfileBuildSettings `json:"build"`
+	Version   int                  `json:"version"`
+	OutputDir string               `json:"output_dir"`
+	Name      string               `json:"name"`
+	Targets   []ProfilePlatform    `json:"targets"`
+	Build     ProfileBuildSettings `json:"build"`
 }
 
-// ProfileTarget is one OS/arch in the profile.
-type ProfileTarget struct {
-	OS      string `json:"os"`
-	Arch    string `json:"arch"`
-	Enabled bool   `json:"enabled"`
+// ProfilePlatform is one OS/arch row with nested builds for that platform.
+type ProfilePlatform struct {
+	OS      string                 `json:"os"`
+	Arch    string                 `json:"arch"`
+	Enabled bool                   `json:"enabled"`
+	Builds  []ProfilePlatformBuild `json:"builds"`
 }
 
-// ProfileBuildSettings holds build flags (same names as CLI / build-metadata.json).
+// ProfilePlatformBuild is one main package built for a platform.
+type ProfilePlatformBuild struct {
+	Package string `json:"package"` // go build path (e.g. ".", "./cmd/foo")
+	// Filename is the exact artifact name written under builds/<version>/ for this os/arch row.
+	// Empty → pbuild uses the legacy OutputName rules from the main binary name.
+	Filename string `json:"filename"`
+}
+
+// ProfileBuildSettings holds toolchain/build flags (same names as CLI).
 type ProfileBuildSettings struct {
 	Strategy       string `json:"strategy"`
 	AMD64Level     string `json:"amd64_level"`
@@ -77,55 +94,118 @@ func defaultProfileBuildSettings() ProfileBuildSettings {
 	}
 }
 
-func newDefaultProfileConfig() ProfileConfig {
-	def := targets.Default()
-	cfg := ProfileConfig{
-		Version: profileVersion,
-		Build:   defaultProfileBuildSettings(),
-		Targets: make([]ProfileTarget, len(def)),
+func inferProfileDefaultName(workDir string) string {
+	if m, err := fsutil.InferModulePath(workDir); err == nil && m != "" {
+		parts := strings.Split(m, "/")
+		return parts[len(parts)-1]
 	}
-	for i, t := range def {
-		cfg.Targets[i] = ProfileTarget{OS: t.OS, Arch: t.Arch, Enabled: true}
-	}
-	return cfg
+	return filepath.Base(workDir)
 }
 
-// loadProfile reads builds/pbuild-profile.json or creates it on first run.
-// Older v1 profiles are upgraded in place to v2 with default build settings.
+func mainPackageEntries(workDir string) []ProfilePlatformBuild {
+	name := inferProfileDefaultName(workDir)
+	mains, err := pkgdisc.Discover(workDir, name)
+	if err != nil || len(mains) == 0 {
+		return []ProfilePlatformBuild{{Package: ".", Filename: ""}}
+	}
+	out := make([]ProfilePlatformBuild, len(mains))
+	for i, m := range mains {
+		out[i] = ProfilePlatformBuild{Package: m.BuildPath, Filename: ""}
+	}
+	return out
+}
+
+func baseNameForPackage(workDir, pkg string) string {
+	name := inferProfileDefaultName(workDir)
+	mains, err := pkgdisc.Discover(workDir, name)
+	if err != nil {
+		return name
+	}
+	pkg = normalizeProfilePackage(pkg)
+	for _, m := range mains {
+		if normalizeProfilePackage(m.BuildPath) == pkg {
+			return m.Name
+		}
+	}
+	return name
+}
+
+func buildsWithExactFilenames(entries []ProfilePlatformBuild, t targets.Target, workDir string) []ProfilePlatformBuild {
+	out := make([]ProfilePlatformBuild, len(entries))
+	for i, e := range entries {
+		base := e.Filename
+		if base == "" {
+			base = baseNameForPackage(workDir, e.Package)
+		}
+		out[i] = ProfilePlatformBuild{
+			Package:  normalizeProfilePackage(e.Package),
+			Filename: targets.OutputName(base, t),
+		}
+	}
+	return out
+}
+
+func defaultPlatformTargets(workDir string, allEnabled bool) []ProfilePlatform {
+	def := targets.Default()
+	entries := mainPackageEntries(workDir)
+	out := make([]ProfilePlatform, len(def))
+	for i, t := range def {
+		out[i] = ProfilePlatform{
+			OS:      t.OS,
+			Arch:    t.Arch,
+			Enabled: allEnabled,
+			Builds:  buildsWithExactFilenames(entries, t, workDir),
+		}
+	}
+	return out
+}
+
+func newDefaultProfileConfig(workDir string) ProfileConfig {
+	return ProfileConfig{
+		Version:   profileVersion,
+		OutputDir: "builds",
+		Build:     defaultProfileBuildSettings(),
+		Targets:   defaultPlatformTargets(workDir, true),
+	}
+}
+
 func loadProfile(workDir string) (cfg ProfileConfig, matrix []targets.Target, justCreated bool, err error) {
-	profileDir := filepath.Join(workDir, profileDirName)
-	path := filepath.Join(profileDir, profileFilename)
+	path := filepath.Join(workDir, profileDirName, profileFilename)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return ProfileConfig{}, nil, false, fmt.Errorf("read profile: %w", err)
 		}
-		cfg = newDefaultProfileConfig()
+		cfg = newDefaultProfileConfig(workDir)
 		if err := writeProfileFile(path, cfg); err != nil {
 			return ProfileConfig{}, nil, false, err
 		}
-	return cfg, enabledTargets(cfg.Targets), true, nil
+		return cfg, enabledPlatforms(cfg.Targets), true, nil
 	}
 
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return ProfileConfig{}, nil, false, fmt.Errorf("parse profile: %w", err)
 	}
 
-	if migrated := migrateProfileConfig(&cfg); migrated {
+	if profileNeedsLegacyConversion(data) {
+		cfg, err = convertLegacyProfileToCurrent(data, workDir)
+		if err != nil {
+			return ProfileConfig{}, nil, false, fmt.Errorf("convert legacy profile: %w", err)
+		}
 		if err := writeProfileFile(path, cfg); err != nil {
 			return ProfileConfig{}, nil, false, err
 		}
-		fmt.Printf("Profile migrated to version %d (build settings added): %s\n", profileVersion, path)
+		fmt.Printf("Profile converted to current format: %s\n", path)
 	}
 
-	return cfg, enabledTargets(cfg.Targets), false, nil
+	return cfg, enabledPlatforms(cfg.Targets), false, nil
 }
 
-func enabledTargets(pts []ProfileTarget) []targets.Target {
+func enabledPlatforms(platforms []ProfilePlatform) []targets.Target {
 	var matrix []targets.Target
-	for _, t := range pts {
-		if t.Enabled {
-			matrix = append(matrix, targets.Target{OS: t.OS, Arch: t.Arch})
+	for _, p := range platforms {
+		if p.Enabled && len(p.Builds) > 0 {
+			matrix = append(matrix, targets.Target{OS: p.OS, Arch: p.Arch})
 		}
 	}
 	return matrix
@@ -145,36 +225,111 @@ func writeProfileFile(path string, cfg ProfileConfig) error {
 	return nil
 }
 
-// migrateProfileConfig upgrades v1 profiles and fills missing build fields. Returns true if cfg changed.
-func migrateProfileConfig(cfg *ProfileConfig) bool {
-	changed := false
-
-	if cfg.Version < profileVersion {
-		cfg.Version = profileVersion
-		cfg.Build = defaultProfileBuildSettings()
-		changed = true
-	} else if !profileBuildPopulated(cfg.Build) {
-		cfg.Build = defaultProfileBuildSettings()
-		changed = true
-	} else {
-		merged := mergeProfileBuildSettings(cfg.Build, defaultProfileBuildSettings())
-		if merged != cfg.Build {
-			cfg.Build = merged
-			changed = true
+// profileNeedsLegacyConversion reports OG profiles (targets without a non-empty "builds" list).
+func profileNeedsLegacyConversion(raw []byte) bool {
+	var top struct {
+		Targets []json.RawMessage `json:"targets"`
+	}
+	if err := json.Unmarshal(raw, &top); err != nil || len(top.Targets) == 0 {
+		return false
+	}
+	for _, tr := range top.Targets {
+		var row map[string]json.RawMessage
+		if err := json.Unmarshal(tr, &row); err != nil {
+			continue
+		}
+		braw, ok := row["builds"]
+		if !ok {
+			return true
+		}
+		var builds []json.RawMessage
+		if err := json.Unmarshal(braw, &builds); err != nil || len(builds) == 0 {
+			return true
 		}
 	}
-
-	synced := syncProfileTargets(cfg.Targets)
-	if !profileTargetsEqual(cfg.Targets, synced) {
-		cfg.Targets = synced
-		changed = true
-	}
-
-	return changed
+	return false
 }
 
-func profileBuildPopulated(b ProfileBuildSettings) bool {
-	return b.Strategy != "" && b.AMD64Level != "" && b.BuildMode != "" && b.Parallel > 0
+type legacyTargetRow struct {
+	OS       string `json:"os"`
+	Arch     string `json:"arch"`
+	Enabled  bool   `json:"enabled"`
+	Filename string `json:"filename"`
+	Package  string `json:"package"`
+}
+
+// convertLegacyProfileToCurrent rewrites OG / flat target rows into nested builds (exact filenames per os/arch).
+func convertLegacyProfileToCurrent(raw []byte, workDir string) (ProfileConfig, error) {
+	var old struct {
+		Version   int                  `json:"version"`
+		OutputDir string               `json:"output_dir"`
+		Name      string               `json:"name"`
+		Build     ProfileBuildSettings `json:"build"`
+		Targets   []legacyTargetRow    `json:"targets"`
+	}
+	if err := json.Unmarshal(raw, &old); err != nil {
+		return ProfileConfig{}, err
+	}
+
+	entries := mainPackageEntries(workDir)
+	platforms := make([]ProfilePlatform, 0, len(old.Targets))
+
+	type key struct{ os, arch string }
+	byPlatform := make(map[key]*ProfilePlatform)
+	order := []key{}
+
+	for _, row := range old.Targets {
+		k := key{os: row.OS, arch: row.Arch}
+		plat, ok := byPlatform[k]
+		if !ok {
+			plat = &ProfilePlatform{OS: row.OS, Arch: row.Arch, Enabled: row.Enabled}
+			byPlatform[k] = plat
+			order = append(order, k)
+		}
+		t := targets.Target{OS: row.OS, Arch: row.Arch}
+		pkg := row.Package
+		if pkg == "" {
+			pkg = "."
+		}
+		fn := row.Filename
+		if fn == "" {
+			for _, b := range buildsWithExactFilenames(entries, t, workDir) {
+				plat.Builds = append(plat.Builds, b)
+			}
+			continue
+		}
+		base := fn
+		plat.Builds = append(plat.Builds, ProfilePlatformBuild{
+			Package:  normalizeProfilePackage(pkg),
+			Filename: targets.OutputName(base, t),
+		})
+	}
+
+	for _, k := range order {
+		p := byPlatform[k]
+		if len(p.Builds) == 0 {
+			t := targets.Target{OS: p.OS, Arch: p.Arch}
+			p.Builds = buildsWithExactFilenames(entries, t, workDir)
+		}
+		platforms = append(platforms, *p)
+	}
+
+	if len(platforms) == 0 {
+		platforms = defaultPlatformTargets(workDir, true)
+	}
+
+	outDir := old.OutputDir
+	if outDir == "" {
+		outDir = "builds"
+	}
+
+	return ProfileConfig{
+		Version:   profileVersion,
+		OutputDir: outDir,
+		Name:      old.Name,
+		Build:     mergeProfileBuildSettings(old.Build, defaultProfileBuildSettings()),
+		Targets:   platforms,
+	}, nil
 }
 
 func mergeProfileBuildSettings(existing, defaults ProfileBuildSettings) ProfileBuildSettings {
@@ -225,34 +380,34 @@ func mergeProfileBuildSettings(existing, defaults ProfileBuildSettings) ProfileB
 	return out
 }
 
-func syncProfileTargets(existing []ProfileTarget) []ProfileTarget {
-	def := targets.Default()
-	byKey := make(map[string]ProfileTarget, len(existing))
-	for _, t := range existing {
-		byKey[t.OS+"/"+t.Arch] = t
+func normalizeProfilePackage(path string) string {
+	path = strings.TrimSpace(path)
+	path = filepath.ToSlash(path)
+	if path == "" {
+		return "."
 	}
-	out := make([]ProfileTarget, len(def))
-	for i, t := range def {
-		key := t.OS + "/" + t.Arch
-		if prev, ok := byKey[key]; ok {
-			out[i] = prev
-		} else {
-			out[i] = ProfileTarget{OS: t.OS, Arch: t.Arch, Enabled: false}
-		}
+	if !strings.HasPrefix(path, "./") && path != "." {
+		path = "./" + path
 	}
-	return out
+	return path
 }
 
-func profileTargetsEqual(a, b []ProfileTarget) bool {
-	if len(a) != len(b) {
-		return false
+func applyProfileConfig(cmd *cobra.Command, cfg ProfileConfig) {
+	if cmd == nil {
+		return
 	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
+	applyStringFlag(cmd, "output-dir", &flagOutDir, cfg.OutputDir)
+	applyStringFlag(cmd, "name", &flagName, cfg.Name)
+	applyProfileBuildSettings(cmd, cfg.Build)
+	profilePlatforms = append([]ProfilePlatform(nil), cfg.Targets...)
+}
+
+// profileArtifactName is the basename for go build -o under builds/<version>/.
+func profileArtifactName(profileFilename, binaryName string, t targets.Target) string {
+	if profileFilename != "" {
+		return profileFilename
 	}
-	return true
+	return targets.OutputName(binaryName, t)
 }
 
 func applyProfileBuildSettings(cmd *cobra.Command, b ProfileBuildSettings) {
