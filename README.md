@@ -276,53 +276,57 @@ Flags:
 
 With `--profile`, pbuild reads `builds/pbuild-profile.json` for **which targets to build** and **default build flags** (strategy, CPU levels, `vendor`, `parallel`, etc.). Command-line flags still win when you pass them explicitly (e.g. `pbuild --profile --amd64-level v3` overrides the profile for that run).
 
-1. **First run:** `pbuild --profile` creates `builds/pbuild-profile.json` (version 2) with all targets enabled and default build settings, then exits. Edit the file, then run again.
-2. **Edit targets:** Set `"enabled": false` for OS/arch pairs you do not want.
-3. **Edit build:** Change fields under `"build"` (same names as in `build-metadata.json` / CLI flags, e.g. `amd64_level`, `strategy`, `vendor`).
-4. **Next runs:** `pbuild --profile` uses the saved settings.
+1. **First run:** `pbuild --profile` creates `builds/pbuild-profile.json` (version 6) with every platform and every discovered main package listed. Each row’s **`filename`** is the **exact** artifact name for that `os`/`arch` (e.g. `gitcng` on linux/amd64, `gitcng-arm64-linux` on linux/arm64, `gitcng.exe` on windows/amd64), then exits. Edit the file, then run again.
+2. **Edit platforms:** Set `"enabled": false` on an `os`/`arch` row you do not want.
+3. **Edit outputs:** Each **`builds`** entry: **`package`** (go build path) and **`filename`** (exact file written under `builds/<version>/` for that platform). **Non-empty `filename` is used as-is for `-o`.** Empty **`filename`** → legacy naming from the main binary name (`targets.OutputName`).
+4. **Edit toolchain:** Change `"build"` (strategy, CPU levels, `vendor`, etc.) and `"output_dir"`.
 
-Example profile:
+pbuild **writes the profile file only once** when the file is missing (first `pbuild --profile`), or **once** when upgrading an **old** profile (targets without a `builds` list) to the current nested format. After that it **reads** your JSON as-is — no ongoing migration or rewriting.
+
+Example (single main at module root):
 
 ```json
 {
-  "version": 2,
-  "build": {
-    "strategy": "purego",
-    "amd64_level": "v1",
-    "arm64_level": "v8.0",
-    "arm_level": "7",
-    "mips_level": "hardfloat",
-    "ppc64_level": "power8",
-    "riscv_level": "rva20u64",
-    "buildmode": "auto",
-    "tags": "",
-    "ldflags": "",
-    "build_flags": "",
-    "compress": "",
-    "parallel": 8,
-    "verbose": false,
-    "skip_cleanup": false,
-    "stop_on_error": false,
-    "clean_cache": false,
-    "checksums": true,
-    "reproducible": false,
-    "vendor": false,
-    "sign": false,
-    "signing_key_file": "",
-    "signing_key": "",
-    "sign_armor": false,
-    "provenance": false
-  },
+  "version": 6,
+  "output_dir": "builds",
+  "name": "",
+  "build": { "strategy": "purego", "amd64_level": "v1", "...": "..." },
   "targets": [
-    { "os": "linux", "arch": "amd64", "enabled": true },
-    { "os": "linux", "arch": "arm64", "enabled": true },
-    { "os": "darwin", "arch": "arm64", "enabled": true },
-    { "os": "windows", "arch": "amd64", "enabled": true }
+    {
+      "os": "linux",
+      "arch": "amd64",
+      "enabled": true,
+      "builds": [
+        { "package": ".", "filename": "myapp" }
+      ]
+    },
+    {
+      "os": "linux",
+      "arch": "arm64",
+      "enabled": true,
+      "builds": [
+        { "package": ".", "filename": "myapp-arm64-linux" }
+      ]
+    }
   ]
 }
 ```
 
-Profiles with `"version": 1` (targets only) are **migrated automatically** on the next `pbuild --profile` run: the file is rewritten as version 2 with a full `"build"` section (defaults), your existing target enable/disable choices are preserved, and any new platform entries pbuild knows about are appended as `"enabled": false`. The profile file lives under your output dir (default `builds/`), which is typically in `.gitignore`.
+Example (two commands — **`filename` differs per platform row when needed):
+
+```json
+{
+  "os": "linux",
+  "arch": "amd64",
+  "enabled": true,
+  "builds": [
+    { "package": "./cmd/earsaudiobridge-client", "filename": "earsaudiobridge-client" },
+    { "package": "./cmd/earsaudiobridge-server", "filename": "earsaudiobridge-server" }
+  ]
+}
+```
+
+On first create, pbuild fills **`filename`** on each `os`/`arch` row with the exact name that row would produce (same rules as a normal pbuild build). Change it only when you want a different on-disk name. **`""`** falls back to legacy naming for that build.
 
 ## Generating a GPG key pair
 
