@@ -279,7 +279,8 @@ With `--profile`, pbuild reads `builds/pbuild-profile.json` for **which targets 
 1. **First run:** `pbuild --profile` creates `builds/pbuild-profile.json` (version 6) with every platform and every discovered main package listed. Each row’s **`filename`** is the **exact** artifact name for that `os`/`arch` (e.g. `gitcng` on linux/amd64, `gitcng-arm64-linux` on linux/arm64, `gitcng.exe` on windows/amd64), then exits. Edit the file, then run again.
 2. **Edit platforms:** Set `"enabled": false` on an `os`/`arch` row you do not want.
 3. **Edit outputs:** Each **`builds`** entry: **`package`** (go build path) and **`filename`** (exact file written under `builds/<version>/` for that platform). **Non-empty `filename` is used as-is for `-o`.** Empty **`filename`** → legacy naming from the main binary name (`targets.OutputName`).
-4. **Edit toolchain:** Change `"build"` (strategy, CPU levels, `vendor`, etc.) and `"output_dir"`.
+4. **Edit toolchain:** Change `"build"` (strategy, CPU levels, `vendor`, sign, provenance, etc.) and `"output_dir"`.
+5. **Edit release:** Change `"release"` for GitHub or Gitea upload defaults (`forge`, `api_url`, `upload_after_build`, …). Tokens stay in the environment (`GITHUB_TOKEN` / `GITEA_TOKEN`), never in the profile.
 
 pbuild **writes the profile file only once** when the file is missing (first `pbuild --profile`), or **once** when upgrading an **old** profile (targets without a `builds` list) to the current nested format. After that it **reads** your JSON as-is — no ongoing migration or rewriting.
 
@@ -462,15 +463,34 @@ With `--provenance`, pbuild writes a single **SLSA build provenance** file (`pro
 
 **Verification**: Downstreams can open `provenance.intoto.jsonl`, verify its signature (if present), then parse each line as a JSON Statement and check `subject[].digest` against the corresponding artifact. Tools like [slsa-verifier](https://github.com/slsa-framework/slsa-verifier) can be used with a policy that accepts pbuild’s build type and builder ID.
 
-## GitHub release upload
+## Release upload (GitHub and Gitea/Forgejo)
 
-With `--upload-release`, pbuild uploads **all files** in the version build directory (binaries, checksums, signatures, provenance, build-metadata.json, etc.) to a GitHub release. This uses the GitHub REST API; no `gh` CLI is required.
+With `--upload-release` (or `"upload_after_build": true` in the profile), pbuild uploads **all files** in the version build directory to a release. Uses the hosting REST API; no `gh` CLI required.
 
-- **Default (update only)**: The release for the given tag must already exist. pbuild gets that release and uploads each file as an asset. If no release exists, pbuild exits with an error and suggests using `--release-create`.
-- **`--release-create`**: If the release does not exist, pbuild creates it (with optional `--release-draft` and `--release-notes` or `--release-notes-file`), then uploads assets. The tag is created at `HEAD` if it does not exist.
-- **Repo**: Inferred from `git config remote.origin.url` (supports `https://github.com/owner/repo` and `git@github.com:owner/repo.git`). Override with `--release-repo owner/repo`.
-- **Tag**: Defaults to the actual version with a `v` prefix (e.g. `v1.3.27-ab5bb44`). Use `--release-tag` only if you want a different tag (e.g. `v1.3.27`).
-- **Auth**: Set the `GITHUB_TOKEN` environment variable (e.g. a fine-grained or classic PAT with `repo` scope). Required when uploading.
+- **`--release-forge` / profile `release.forge`:** `github` (default) or `gitea` (Forgejo uses `gitea`).
+- **Gitea:** Set `--release-api-url` or profile `release.api_url` to your instance (e.g. `https://git.example.com`).
+- **Default (update only):** The release for the tag must already exist, unless `--release-create` / profile `create_if_missing`.
+- **Repo:** From `git remote origin` (GitHub, Gitea, etc.) or `--release-repo owner/repo` / profile `release.repo`.
+- **Tag:** Defaults to `v` + build version. Override with `--release-tag` / profile `release.tag`.
+- **Auth:** `GITHUB_TOKEN` for GitHub; `GITEA_TOKEN` (or `GITHUB_TOKEN`) for Gitea.
+
+Profile example:
+
+```json
+"release": {
+  "forge": "gitea",
+  "api_url": "https://git.example.com",
+  "upload_after_build": false,
+  "create_if_missing": true,
+  "repo": "",
+  "tag": "",
+  "draft": false,
+  "notes": "",
+  "notes_file": ""
+}
+```
+
+`pbuild upload` loads `builds/pbuild-profile.json` release settings when the file exists (CLI flags still override).
 
 ### Build and upload in one run
 
