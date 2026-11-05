@@ -27,11 +27,25 @@ var profilePlatforms []ProfilePlatform
 
 // ProfileConfig is stored in builds/pbuild-profile.json.
 type ProfileConfig struct {
-	Version   int                  `json:"version"`
-	OutputDir string               `json:"output_dir"`
-	Name      string               `json:"name"`
-	Targets   []ProfilePlatform    `json:"targets"`
-	Build     ProfileBuildSettings `json:"build"`
+	Version   int                    `json:"version"`
+	OutputDir string                 `json:"output_dir"`
+	Name      string                 `json:"name"`
+	Targets   []ProfilePlatform      `json:"targets"`
+	Build     ProfileBuildSettings   `json:"build"`
+	Release   ProfileReleaseSettings `json:"release"`
+}
+
+// ProfileReleaseSettings holds GitHub/Gitea release upload defaults (same semantics as CLI).
+type ProfileReleaseSettings struct {
+	Forge            string `json:"forge"` // "github" or "gitea" (forgejo uses gitea)
+	APIURL           string `json:"api_url"`
+	UploadAfterBuild bool   `json:"upload_after_build"`
+	CreateIfMissing  bool   `json:"create_if_missing"`
+	Repo             string `json:"repo"`
+	Tag              string `json:"tag"`
+	Draft            bool   `json:"draft"`
+	Notes            string `json:"notes"`
+	NotesFile        string `json:"notes_file"`
 }
 
 // ProfilePlatform is one OS/arch row with nested builds for that platform.
@@ -77,6 +91,12 @@ type ProfileBuildSettings struct {
 	SigningKey     string `json:"signing_key"`
 	SignArmor      bool   `json:"sign_armor"`
 	Provenance     bool   `json:"provenance"`
+}
+
+func defaultProfileReleaseSettings() ProfileReleaseSettings {
+	return ProfileReleaseSettings{
+		Forge: "github",
+	}
 }
 
 func defaultProfileBuildSettings() ProfileBuildSettings {
@@ -165,6 +185,7 @@ func newDefaultProfileConfig(workDir string) ProfileConfig {
 		Version:   profileVersion,
 		OutputDir: "builds",
 		Build:     defaultProfileBuildSettings(),
+		Release:   defaultProfileReleaseSettings(),
 		Targets:   defaultPlatformTargets(workDir, true),
 	}
 }
@@ -177,6 +198,7 @@ func loadProfile(workDir string) (cfg ProfileConfig, matrix []targets.Target, ju
 			return ProfileConfig{}, nil, false, fmt.Errorf("read profile: %w", err)
 		}
 		cfg = newDefaultProfileConfig(workDir)
+		fillProfileDefaults(&cfg)
 		if err := writeProfileFile(path, cfg); err != nil {
 			return ProfileConfig{}, nil, false, err
 		}
@@ -197,6 +219,8 @@ func loadProfile(workDir string) (cfg ProfileConfig, matrix []targets.Target, ju
 		}
 		fmt.Printf("Profile converted to current format: %s\n", path)
 	}
+
+	fillProfileDefaults(&cfg)
 
 	return cfg, enabledPlatforms(cfg.Targets), false, nil
 }
@@ -328,8 +352,51 @@ func convertLegacyProfileToCurrent(raw []byte, workDir string) (ProfileConfig, e
 		OutputDir: outDir,
 		Name:      old.Name,
 		Build:     mergeProfileBuildSettings(old.Build, defaultProfileBuildSettings()),
+		Release:   defaultProfileReleaseSettings(),
 		Targets:   platforms,
 	}, nil
+}
+
+func fillProfileDefaults(cfg *ProfileConfig) {
+	if cfg == nil {
+		return
+	}
+	if cfg.OutputDir == "" {
+		cfg.OutputDir = "builds"
+	}
+	cfg.Build = mergeProfileBuildSettings(cfg.Build, defaultProfileBuildSettings())
+	cfg.Release = mergeProfileReleaseSettings(cfg.Release, defaultProfileReleaseSettings())
+}
+
+func mergeProfileReleaseSettings(existing, defaults ProfileReleaseSettings) ProfileReleaseSettings {
+	out := defaults
+	if existing.Forge != "" {
+		out.Forge = existing.Forge
+	}
+	out.APIURL = existing.APIURL
+	out.Repo = existing.Repo
+	out.Tag = existing.Tag
+	out.Notes = existing.Notes
+	out.NotesFile = existing.NotesFile
+	out.UploadAfterBuild = existing.UploadAfterBuild
+	out.CreateIfMissing = existing.CreateIfMissing
+	out.Draft = existing.Draft
+	return out
+}
+
+// loadAndApplyProfileFromFile applies builds/pbuild-profile.json when present (does not create it).
+func loadAndApplyProfileFromFile(cmd *cobra.Command, workDir string) {
+	path := filepath.Join(workDir, profileDirName, profileFilename)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var cfg ProfileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return
+	}
+	fillProfileDefaults(&cfg)
+	applyProfileConfig(cmd, cfg)
 }
 
 func mergeProfileBuildSettings(existing, defaults ProfileBuildSettings) ProfileBuildSettings {
@@ -399,6 +466,7 @@ func applyProfileConfig(cmd *cobra.Command, cfg ProfileConfig) {
 	applyStringFlag(cmd, "output-dir", &flagOutDir, cfg.OutputDir)
 	applyStringFlag(cmd, "name", &flagName, cfg.Name)
 	applyProfileBuildSettings(cmd, cfg.Build)
+	applyProfileReleaseSettings(cmd, cfg.Release)
 	profilePlatforms = append([]ProfilePlatform(nil), cfg.Targets...)
 }
 
@@ -442,6 +510,21 @@ func applyProfileBuildSettings(cmd *cobra.Command, b ProfileBuildSettings) {
 	applyBoolFlag(cmd, "sign", &flagSign, b.Sign)
 	applyBoolFlag(cmd, "sign-armor", &flagSignArmor, b.SignArmor)
 	applyBoolFlag(cmd, "provenance", &flagProvenance, b.Provenance)
+}
+
+func applyProfileReleaseSettings(cmd *cobra.Command, r ProfileReleaseSettings) {
+	if cmd == nil {
+		return
+	}
+	applyStringFlag(cmd, "release-forge", &flagReleaseForge, r.Forge)
+	applyStringFlag(cmd, "release-api-url", &flagReleaseAPIURL, r.APIURL)
+	applyStringFlag(cmd, "release-repo", &flagReleaseRepo, r.Repo)
+	applyStringFlag(cmd, "release-tag", &flagReleaseTag, r.Tag)
+	applyStringFlag(cmd, "release-notes", &flagReleaseNotes, r.Notes)
+	applyStringFlag(cmd, "release-notes-file", &flagReleaseNotesFile, r.NotesFile)
+	applyBoolFlag(cmd, "upload-release", &flagUploadRelease, r.UploadAfterBuild)
+	applyBoolFlag(cmd, "release-create", &flagReleaseCreate, r.CreateIfMissing)
+	applyBoolFlag(cmd, "release-draft", &flagReleaseDraft, r.Draft)
 }
 
 func applyStringFlag(cmd *cobra.Command, name string, dst *string, value string) {

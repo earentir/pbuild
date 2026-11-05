@@ -38,7 +38,7 @@ import (
 	"golang.org/x/term"
 )
 
-var appVersion = "1.3.39"
+var appVersion = "1.3.41"
 
 // getBuildMode returns the appropriate build mode for the target platform
 func getBuildMode(requestedMode string) string {
@@ -305,6 +305,8 @@ var (
 	flagProvenance       bool
 	flagUploadRelease    bool
 	flagReleaseCreate    bool
+	flagReleaseForge     string
+	flagReleaseAPIURL    string
 	flagReleaseRepo      string
 	flagReleaseTag       string
 	flagReleaseDraft     bool
@@ -379,20 +381,22 @@ func main() {
 	// SLSA provenance (in-toto attestations)
 	root.Flags().BoolVar(&flagProvenance, "provenance", false, "write SLSA provenance (provenance.intoto.jsonl) for OpenSSF/supply-chain verification")
 
-	// GitHub release upload
-	root.Flags().BoolVar(&flagUploadRelease, "upload-release", false, "upload build artifacts to a GitHub release (release must exist unless --release-create)")
-	root.Flags().BoolVar(&flagReleaseCreate, "release-create", false, "create the release if it does not exist (only with --upload-release)")
-	root.Flags().StringVar(&flagReleaseRepo, "release-repo", "", "GitHub repo owner/name (default: from git remote origin)")
+	// Release upload (GitHub or Gitea/Forgejo)
+	root.Flags().BoolVar(&flagUploadRelease, "upload-release", false, "upload build artifacts to a release after build (release must exist unless --release-create)")
+	root.Flags().BoolVar(&flagReleaseCreate, "release-create", false, "create the release if it does not exist (with --upload-release or pbuild upload)")
+	root.Flags().StringVar(&flagReleaseForge, "release-forge", "github", "release host API: github or gitea (forgejo uses gitea)")
+	root.Flags().StringVar(&flagReleaseAPIURL, "release-api-url", "", "Gitea/Forgejo instance URL (e.g. https://git.example.com); required when release-forge=gitea")
+	root.Flags().StringVar(&flagReleaseRepo, "release-repo", "", "repo owner/name (default: from git remote origin)")
 	root.Flags().StringVar(&flagReleaseTag, "release-tag", "", "release tag (default: v + version, e.g. v1.3.27-ab5bb44)")
 	root.Flags().BoolVar(&flagReleaseDraft, "release-draft", false, "when creating, create as draft release")
 	root.Flags().StringVar(&flagReleaseNotes, "release-notes", "", "release notes body when creating")
 	root.Flags().StringVar(&flagReleaseNotesFile, "release-notes-file", "", "path to file containing release notes when creating")
 
-	// Upload subcommand: upload an existing build to GitHub (no build step)
+	// Upload subcommand: upload an existing build (no build step)
 	uploadCmd := &cobra.Command{
 		Use:   "upload [VERSION]",
-		Short: "Upload an existing build to a GitHub release",
-		Long:  "Upload artifacts from a version directory (from a previous build) to a GitHub release. Specify which build with VERSION, --version, or --version-dir; use --list to see available builds.",
+		Short: "Upload an existing build to a GitHub or Gitea release",
+		Long:  "Upload artifacts from a version directory to a release. Uses builds/pbuild-profile.json release settings when present. Specify which build with VERSION, --version, or --version-dir; use --list to see available builds.",
 		Args:  cobra.MaximumNArgs(1),
 		RunE:  runUploadCmd,
 	}
@@ -401,7 +405,9 @@ func main() {
 	uploadCmd.Flags().BoolVar(&flagUploadList, "list", false, "list available version directories and exit")
 	uploadCmd.Flags().StringVar(&flagOutDir, "output-dir", "builds", "directory containing version subdirs (for --version and --list)")
 	uploadCmd.Flags().BoolVar(&flagReleaseCreate, "release-create", false, "create the release if it does not exist")
-	uploadCmd.Flags().StringVar(&flagReleaseRepo, "release-repo", "", "GitHub repo owner/name (default: from git remote origin)")
+	uploadCmd.Flags().StringVar(&flagReleaseForge, "release-forge", "github", "release host API: github or gitea")
+	uploadCmd.Flags().StringVar(&flagReleaseAPIURL, "release-api-url", "", "Gitea/Forgejo instance URL when release-forge=gitea")
+	uploadCmd.Flags().StringVar(&flagReleaseRepo, "release-repo", "", "repo owner/name (default: from git remote origin)")
 	uploadCmd.Flags().StringVar(&flagReleaseTag, "release-tag", "", "release tag (default: v + version)")
 	uploadCmd.Flags().BoolVar(&flagReleaseDraft, "release-draft", false, "when creating, create as draft release")
 	uploadCmd.Flags().StringVar(&flagReleaseNotes, "release-notes", "", "release notes body when creating")
@@ -1268,12 +1274,19 @@ func run(cmd *cobra.Command, targetDir string, isRetry bool) error {
 	return nil
 }
 
-// runUpload uploads the contents of versionDir to a GitHub release. versionTag is used as the
-// default release tag (with "v" prefix if needed). Caller must ensure versionDir exists.
+// runUpload uploads the contents of versionDir to a GitHub or Gitea release.
 func runUpload(gitRoot, versionDir, versionTag string) error {
-	token := os.Getenv("GITHUB_TOKEN")
-	if token == "" {
-		return fmt.Errorf("upload release: GITHUB_TOKEN is required")
+	forge := release.ParseForge(flagReleaseForge)
+	client, err := release.NewClient(release.Config{
+		Forge:  forge,
+		APIURL: flagReleaseAPIURL,
+	})
+	if err != nil {
+		return err
+	}
+	token, err := release.TokenForForge(forge)
+	if err != nil {
+		return err
 	}
 	owner, repoName := "", ""
 	if flagReleaseRepo != "" {
@@ -1297,7 +1310,7 @@ func runUpload(gitRoot, versionDir, versionTag string) error {
 			releaseTag = "v" + versionTag
 		}
 	}
-	releaseID, err := release.GetReleaseByTag(owner, repoName, releaseTag, token)
+	releaseID, err := client.GetReleaseByTag(owner, repoName, releaseTag, token)
 	if err != nil {
 		if err == release.ErrNotFound {
 			if !flagReleaseCreate {
@@ -1311,7 +1324,7 @@ func runUpload(gitRoot, versionDir, versionTag string) error {
 				}
 				notes = string(b)
 			}
-			releaseID, err = release.CreateRelease(owner, repoName, releaseTag, releaseTag, notes, flagReleaseDraft, "HEAD", token)
+			releaseID, err = client.CreateRelease(owner, repoName, releaseTag, releaseTag, notes, flagReleaseDraft, "HEAD", token)
 			if err != nil {
 				return fmt.Errorf("upload release: create release: %w", err)
 			}
@@ -1330,22 +1343,18 @@ func runUpload(gitRoot, versionDir, versionTag string) error {
 			continue
 		}
 		path := filepath.Join(versionDir, e.Name())
-		if err := release.UploadAsset(owner, repoName, releaseID, path, token); err != nil {
+		if err := client.UploadAsset(owner, repoName, releaseID, path, token); err != nil {
 			return fmt.Errorf("upload release: %w", err)
 		}
 		fmt.Printf("Uploaded %s\n", e.Name())
 		uploaded++
 	}
-	fmt.Printf("Uploaded %d asset(s) to release %s\n", uploaded, releaseTag)
+	fmt.Printf("Uploaded %d asset(s) to %s release %s\n", uploaded, forge, releaseTag)
 	return nil
 }
 
-func runUploadCmd(_ *cobra.Command, args []string) error {
-	target := "."
-	if len(args) == 1 {
-		target = args[0]
-	}
-	abs, err := filepath.Abs(target)
+func runUploadCmd(cmd *cobra.Command, args []string) error {
+	abs, err := filepath.Abs(".")
 	if err != nil {
 		return err
 	}
@@ -1357,6 +1366,7 @@ func runUploadCmd(_ *cobra.Command, args []string) error {
 	if gr, err := fsutil.FindGitRoot(workDir); err == nil {
 		gitRoot = gr
 	}
+	loadAndApplyProfileFromFile(cmd, workDir)
 	outDir := flagOutDir
 	if !filepath.IsAbs(outDir) {
 		outDir = filepath.Join(workDir, outDir)
