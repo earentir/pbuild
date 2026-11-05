@@ -2,6 +2,7 @@ package gitmeta
 
 import (
 	"errors"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -87,9 +88,8 @@ func HeuristicDirty(repoRoot string) (bool, error) {
 }
 
 // RemoteOriginRepo returns owner and repo name from git remote origin URL.
-// Supports https://github.com/owner/repo, https://github.com/owner/repo.git,
-// and git@github.com:owner/repo.git. Returns empty strings and an error if
-// origin is not set or URL cannot be parsed.
+// Supports GitHub, Gitea, Forgejo, and other hosts using common URL layouts:
+// https://host/owner/repo(.git), git@host:owner/repo(.git), and github.com variants.
 func RemoteOriginRepo(repoRoot string) (owner, repo string, err error) {
 	cmd := exec.Command("git", "config", "remote.origin.url")
 	cmd.Dir = repoRoot
@@ -97,26 +97,49 @@ func RemoteOriginRepo(repoRoot string) (owner, repo string, err error) {
 	if err != nil {
 		return "", "", err
 	}
-	url := strings.TrimSpace(string(out))
-	if url == "" {
+	raw := strings.TrimSpace(string(out))
+	if raw == "" {
 		return "", "", errors.New("remote origin URL is empty")
 	}
-	// https://github.com/owner/repo or https://github.com/owner/repo.git
-	if strings.Contains(url, "github.com") {
-		re := regexp.MustCompile(`github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?$`)
-		matches := re.FindStringSubmatch(url)
-		if len(matches) == 3 {
-			return matches[1], strings.TrimSuffix(matches[2], ".git"), nil
-		}
-	}
-	// git@github.com:owner/repo.git
-	if strings.HasPrefix(url, "git@github.com:") {
-		trimmed := strings.TrimPrefix(url, "git@github.com:")
-		trimmed = strings.TrimSuffix(trimmed, ".git")
-		parts := strings.SplitN(trimmed, "/", 2)
-		if len(parts) == 2 {
-			return parts[0], parts[1], nil
-		}
+	if o, r, ok := parseOwnerRepoFromRemoteURL(raw); ok {
+		return o, r, nil
 	}
 	return "", "", errors.New("could not parse owner/repo from remote origin URL")
+}
+
+func parseOwnerRepoFromRemoteURL(raw string) (owner, repo string, ok bool) {
+	raw = strings.TrimSpace(raw)
+	raw = strings.TrimSuffix(raw, ".git")
+
+	// git@host:owner/repo
+	if strings.HasPrefix(raw, "git@") && strings.Contains(raw, ":") {
+		idx := strings.Index(raw, ":")
+		path := raw[idx+1:]
+		parts := strings.SplitN(path, "/", 2)
+		if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+			return parts[0], parts[1], true
+		}
+	}
+
+	// https://host/owner/repo or https://host/owner/repo.git
+	if strings.Contains(raw, "://") {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return "", "", false
+		}
+		segments := strings.Split(strings.Trim(u.Path, "/"), "/")
+		if len(segments) >= 2 {
+			return segments[len(segments)-2], segments[len(segments)-1], true
+		}
+	}
+
+	// github.com shorthand patterns
+	if strings.Contains(raw, "github.com") {
+		re := regexp.MustCompile(`github\.com[:/]([^/]+)/([^/]+?)$`)
+		matches := re.FindStringSubmatch(raw)
+		if len(matches) == 3 {
+			return matches[1], matches[2], true
+		}
+	}
+	return "", "", false
 }
